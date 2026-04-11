@@ -1,76 +1,131 @@
 import os
 import io
+import sqlite3
 import qrcode
-import psycopg2
-import psycopg2.extras
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, make_response
 from datetime import datetime
+
+# ── Try to import psycopg2 (only needed on Render/production) ──
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PG = True
+except ImportError:
+    HAS_PG = False
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "nashmi-secret-2024")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+USE_PG       = bool(DATABASE_URL) and HAS_PG          # True on Render, False locally
+DB_PATH      = os.path.join(os.path.dirname(__file__), "nashmi.db")
 
-# ─── DATABASE ────────────────────────────────────────────────────
+# ─── DATABASE LAYER — works with both SQLite and PostgreSQL ───────
+
+class _Cursor:
+    """Thin wrapper so both backends return dict-like rows."""
+    def __init__(self, cursor, pg=False):
+        self._c  = cursor
+        self._pg = pg
+
+    def execute(self, sql, params=()):
+        if not self._pg:
+            sql = sql.replace("%s", "?")   # SQLite uses ?
+        self._c.execute(sql, params)
+        return self
+
+    def fetchone(self):
+        row = self._c.fetchone()
+        if row is None:
+            return None
+        return dict(row)   # both backends return dict-like rows already
+
+    def fetchall(self):
+        return [dict(r) for r in self._c.fetchall()]
+
+    @property
+    def lastrowid(self):
+        return self._c.lastrowid   # SQLite only; PG uses RETURNING
+
+
 def get_db():
-    """Open a new PostgreSQL connection using DATABASE_URL env var."""
-    url = DATABASE_URL
-    # Railway sometimes returns postgres:// — psycopg2 needs postgresql://
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    conn = psycopg2.connect(url)
-    return conn
+    if USE_PG:
+        url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+        conn = psycopg2.connect(url)
+        return conn
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
 
 def cur(conn):
-    """Return a RealDictCursor (rows behave like dicts)."""
-    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if USE_PG:
+        return _Cursor(conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor), pg=True)
+    else:
+        return _Cursor(conn.cursor(), pg=False)
+
 
 def qry(conn, sql, params=()):
-    """Execute a SELECT and return the cursor (caller calls .fetchone()/.fetchall())."""
     c = cur(conn)
     c.execute(sql, params)
     return c
 
+
 def exe(conn, sql, params=()):
-    """Execute an INSERT/UPDATE/DELETE without returning rows."""
     c = cur(conn)
     c.execute(sql, params)
 
+
 def exe_returning(conn, sql, params=()):
-    """Execute INSERT … RETURNING id and return the new row id."""
-    c = cur(conn)
-    c.execute(sql, params)
-    return c.fetchone()["id"]
+    """INSERT … RETURNING id  →  works on PG; SQLite uses lastrowid."""
+    if USE_PG:
+        c = cur(conn)
+        c.execute(sql, params)
+        return c.fetchone()["id"]
+    else:
+        # Strip the RETURNING clause for SQLite
+        sql_lite = sql[:sql.upper().rfind("RETURNING")].strip().rstrip(",")
+        c = cur(conn)
+        c.execute(sql_lite, params)
+        return c._c.lastrowid
+
 
 def init_db():
     conn = get_db()
-    c = cur(conn)
+    c    = cur(conn)
 
-    # ── DDL — PostgreSQL syntax ───────────────────────────────────
-    ddl_statements = [
-        """CREATE TABLE IF NOT EXISTS users (
-            id   SERIAL PRIMARY KEY,
+    if USE_PG:
+        id_col = "SERIAL PRIMARY KEY"
+        num    = "FLOAT"
+    else:
+        id_col = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        num    = "REAL"
+
+    ddl = [
+        f"""CREATE TABLE IF NOT EXISTS users (
+            id   {id_col},
             name TEXT NOT NULL,
             role TEXT NOT NULL,
             pin  TEXT NOT NULL
         )""",
-        """CREATE TABLE IF NOT EXISTS menu_items (
-            id        SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS menu_items (
+            id        {id_col},
             name      TEXT    NOT NULL,
-            price     FLOAT   NOT NULL,
+            price     {num}   NOT NULL,
             category  TEXT    NOT NULL,
             available INTEGER DEFAULT 1
         )""",
-        """CREATE TABLE IF NOT EXISTS days (
-            id         SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS days (
+            id         {id_col},
             started_at TEXT,
             closed_at  TEXT,
             status     TEXT DEFAULT 'open'
         )""",
-        """CREATE TABLE IF NOT EXISTS orders (
-            id         SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS orders (
+            id         {id_col},
             day_id     INTEGER,
-            total      FLOAT  DEFAULT 0,
+            total      {num}  DEFAULT 0,
             payment    TEXT   DEFAULT 'نقدي',
             status     TEXT   DEFAULT 'pending',
             source     TEXT   DEFAULT 'staff',
@@ -78,57 +133,58 @@ def init_db():
             note       TEXT,
             created_at TEXT
         )""",
-        """CREATE TABLE IF NOT EXISTS order_items (
-            id         SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS order_items (
+            id         {id_col},
             order_id   INTEGER,
             item_name  TEXT,
-            price      FLOAT,
+            price      {num},
             qty        INTEGER DEFAULT 1,
             note       TEXT
         )""",
-        """CREATE TABLE IF NOT EXISTS expenses (
-            id         SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS expenses (
+            id         {id_col},
             day_id     INTEGER,
-            amount     FLOAT,
+            amount     {num},
             reason     TEXT,
             employee   TEXT,
             created_at TEXT
         )""",
-        """CREATE TABLE IF NOT EXISTS draws (
-            id         SERIAL PRIMARY KEY,
+        f"""CREATE TABLE IF NOT EXISTS draws (
+            id         {id_col},
             day_id     INTEGER,
-            amount     FLOAT,
+            amount     {num},
             employee   TEXT,
             note       TEXT,
             created_at TEXT
         )""",
     ]
-    for stmt in ddl_statements:
+
+    for stmt in ddl:
         c.execute(stmt)
 
-    # ── Seed default users if table is empty ─────────────────────
     c.execute("SELECT COUNT(*) AS cnt FROM users")
     if c.fetchone()["cnt"] == 0:
-        seed = [
+        for name, role, pin in [
             ("نشمي",   "admin",    "8888"),
             ("المالك", "admin",    "1234"),
             ("عمر",    "employee", "1997"),
             ("ناصر",   "employee", "0000"),
-        ]
-        for name, role, pin in seed:
+        ]:
             c.execute(
-                "INSERT INTO users (name, role, pin) VALUES (%s, %s, %s)",
+                "INSERT INTO users (name, role, pin) VALUES (%s,%s,%s)",
                 (name, role, pin)
             )
 
     conn.commit()
     conn.close()
 
+
 def current_day():
     conn = get_db()
-    day = qry(conn, "SELECT * FROM days WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
+    day  = qry(conn, "SELECT * FROM days WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
-    return dict(day) if day else None
+    return day   # already a dict or None
+
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1722,8 +1778,13 @@ def qr_image():
     resp.headers["Content-Type"] = "image/png"
     return resp
 
+# ─── INIT ON STARTUP (gunicorn + python both) ────────────────────
+try:
+    init_db()
+except Exception as _e:
+    print(f"[init_db] {_e}")
+
 # ─── RUN ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
