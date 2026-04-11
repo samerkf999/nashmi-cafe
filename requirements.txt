@@ -1,0 +1,4 @@
+flask
+qrcode
+gunicorn
+psycopg2-binary
