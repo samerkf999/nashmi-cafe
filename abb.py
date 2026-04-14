@@ -110,11 +110,13 @@ def init_db():
             pin  TEXT NOT NULL
         )""",
         f"""CREATE TABLE IF NOT EXISTS menu_items (
-            id        {id_col},
-            name      TEXT    NOT NULL,
-            price     {num}   NOT NULL,
-            category  TEXT    NOT NULL,
-            available INTEGER DEFAULT 1
+            id          {id_col},
+            name        TEXT    NOT NULL,
+            price       {num}   NOT NULL,
+            category    TEXT    NOT NULL,
+            available   INTEGER DEFAULT 1,
+            description TEXT    DEFAULT '',
+            image_b64   TEXT    DEFAULT ''
         )""",
         f"""CREATE TABLE IF NOT EXISTS days (
             id         {id_col},
@@ -161,6 +163,15 @@ def init_db():
 
     for stmt in ddl:
         c.execute(stmt)
+
+    try:
+        c.execute("ALTER TABLE menu_items ADD COLUMN description TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE menu_items ADD COLUMN image_b64 TEXT DEFAULT ''")
+    except:
+        pass
 
     c.execute("SELECT COUNT(*) AS cnt FROM users")
     if c.fetchone()["cnt"] == 0:
@@ -637,14 +648,14 @@ function renderCart() {
   if (!el) return;
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
   if (countEl) countEl.textContent = cart.reduce((s,i)=>s+i.qty,0) || '';
-  if (totalEl) totalEl.textContent = total.toFixed(2) + ' ر.س';
+  if (totalEl) totalEl.textContent = total.toFixed(2) + ' د.أ';
   if (emptyEl) emptyEl.style.display = cart.length ? 'none' : 'block';
   if (submitEl) submitEl.disabled = cart.length === 0;
   el.innerHTML = cart.map(i => `
     <div class="list-item">
       <button onclick="removeFromCart('${i.name.replace(/'/g,"\\'")}'); return false;" style="background:none;border:none;color:var(--red);font-size:18px;cursor:pointer;">×</button>
-      <div style="flex:1"><div style="font-weight:700">${i.name}</div><div style="font-size:12px;color:var(--text2)">${i.price.toFixed(2)} ر.س × ${i.qty}</div></div>
-      <div style="font-weight:700;color:var(--accent2)">${(i.price*i.qty).toFixed(2)} ر.س</div>
+      <div style="flex:1"><div style="font-weight:700">${i.name}</div><div style="font-size:12px;color:var(--text2)">${i.price.toFixed(2)} د.أ × ${i.qty}</div></div>
+      <div style="font-weight:700;color:var(--accent2)">${(i.price*i.qty).toFixed(2)} د.أ</div>
     </div>`).join('');
 }
 function submitOrder() {
@@ -659,6 +670,7 @@ function submitOrder() {
       items: cart,
       payment: pay ? pay.value : 'نقدي',
       note: note ? note.value : '',
+      delivery: document.getElementById('uniDelivery') ? document.getElementById('uniDelivery').checked : false,
       source: 'staff'
     })
   }).then(r => r.json()).then(d => {
@@ -728,21 +740,21 @@ function renderCustomerCart() {
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const count = cart.reduce((s,i)=>s+i.qty,0);
   if (countEl) countEl.textContent = count || '';
-  if (totalEl) totalEl.textContent = total.toFixed(2) + ' ر.س';
+  if (totalEl) totalEl.textContent = total.toFixed(2) + ' د.أ';
   if (submitEl) submitEl.disabled = cart.length === 0;
   if (section) section.style.display = cart.length ? 'block' : 'none';
   el.innerHTML = cart.map(i => `
     <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
       <div style="flex:1;">
         <div style="font-weight:700;font-size:14px;color:#fff;">${i.name}</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.5);">${i.price.toFixed(2)} ر.س للواحدة</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);">${i.price.toFixed(2)} د.أ للواحدة</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <button onclick="changeCustomerQty('${i.name.replace(/'/g,"\\'")}', -1)" style="background:rgba(255,255,255,0.1);border:none;color:#fff;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">−</button>
         <span style="font-weight:700;color:#f5b835;min-width:20px;text-align:center;">${i.qty}</span>
         <button onclick="changeCustomerQty('${i.name.replace(/'/g,"\\'")}', 1)" style="background:rgba(212,136,10,0.5);border:none;color:#fff;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">+</button>
       </div>
-      <div style="font-weight:700;color:#f5b835;min-width:60px;text-align:left;">${(i.price*i.qty).toFixed(2)} ر.س</div>
+      <div style="font-weight:700;color:#f5b835;min-width:60px;text-align:left;">${(i.price*i.qty).toFixed(2)} د.أ</div>
     </div>`).join('');
 }
 window.addEventListener('DOMContentLoaded', () => { renderCart(); renderCustomerCart(); });
@@ -908,16 +920,24 @@ POS_HTML = """
   {% for cat_key, cat_label in categories.items() %}
     {% set cat_items = items | selectattr('category','equalto',cat_key) | list %}
     {% if cat_items %}
-    <div class="cat-title">{{ cat_label }}</div>
+    <div class="cat-title" onclick="var el = document.getElementById('pos-cat-{{ cat_key }}'); el.style.display = el.style.display === 'none' ? 'block' : 'none';" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+      <span>{{ cat_label }}</span>
+      <span style="font-size:11px;color:var(--muted);">▼</span>
+    </div>
+    <div id="pos-cat-{{ cat_key }}" style="display:none;">
     {% for item in cat_items %}
     <div class="menu-item-card">
       <div>
         <div class="menu-item-name">{{ item['name'] }}</div>
-        <div class="menu-item-price">{{ "%.2f"|format(item['price']) }} ر.س</div>
+        {% if item.get('description') %}
+        <div style="font-size:11px;color:var(--text2);margin-top:2px;">{{ item['description'] }}</div>
+        {% endif %}
+        <div class="menu-item-price">{{ "%.2f"|format(item['price']) }} د.أ</div>
       </div>
       <button class="btn btn-primary btn-sm" onclick="addToCart('{{ item['name']|replace("'", "\\'") }}', {{ item['price'] }})">+ إضافة</button>
     </div>
     {% endfor %}
+    </div>
     {% endif %}
   {% endfor %}
 </div>
@@ -930,7 +950,7 @@ POS_HTML = """
     <div id="cartItems"></div>
     <div class="list-item" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
       <span style="font-weight:700;font-size:16px;">الإجمالي</span>
-      <span id="cartTotal" style="font-weight:900;font-size:18px;color:var(--accent2);">0.00 ر.س</span>
+      <span id="cartTotal" style="font-weight:900;font-size:18px;color:var(--accent2);">0.00 د.أ</span>
     </div>
   </div>
 
@@ -946,6 +966,12 @@ POS_HTML = """
     <div class="form-group">
       <label class="label">ملاحظة (اختياري)</label>
       <input class="input" id="orderNote" placeholder="مثال: بدون سكر...">
+    </div>
+    <div class="form-group" style="margin-top:12px; background:var(--surface2); padding:12px; border-radius:10px; border:1px solid var(--border);">
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+        <input type="checkbox" id="uniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
+        <span style="font-weight:700;font-size:15px;">🎓 توصيل للجامعة</span>
+      </label>
     </div>
   </div>
 
@@ -970,7 +996,8 @@ POS_HTML = """
         <div>
           <span style="font-family:monospace;color:var(--accent2);font-weight:700;">#{{ o['id'] }}</span>
           <span style="font-size:11px;color:var(--text2);margin-right:8px;">{{ o['created_at'][-8:-3] }}</span>
-          {% if o['source']=='customer' %}<span class="badge" style="font-size:10px;background:var(--blue);color:#fff;">زبون</span>{% endif %}
+          {% if 'customer' in o['source'] %}<span class="badge" style="font-size:10px;background:var(--blue);color:#fff;">زبون</span>{% endif %}
+          {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🎓 جامعة</span>{% endif %}
         </div>
         <span class="badge {% if o['status']=='pending' %}{% else %}badge-green{% endif %}">
           {{ 'قيد التنفيذ' if o['status']=='pending' else 'مكتمل' }}
@@ -979,14 +1006,14 @@ POS_HTML = """
       <div class="order-card-body">
         {% for it in o['items'] %}
         <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
-          <span style="color:var(--text2);">{{ "%.2f"|format(it['price']*it['qty']) }} ر.س</span>
+          <span style="color:var(--text2);">{{ "%.2f"|format(it['price']*it['qty']) }} د.أ</span>
           <span>{{ it['qty'] }}× {{ it['item_name'] }}</span>
         </div>
         {% endfor %}
         {% if o['note'] %}<div style="font-size:12px;color:var(--text2);margin-top:6px;">📝 {{ o['note'] }}</div>{% endif %}
       </div>
       <div class="order-card-foot">
-        <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(o['total']) }} ر.س · {{ o['payment'] }}</span>
+        <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(o['total']) }} د.أ · {{ o['payment'] }}</span>
         {% if o['status']=='pending' %}
         <form method="POST" action="/pos/done/{{ o['id'] }}" style="margin:0;">
           <button class="btn btn-green btn-sm" type="submit">✓ تم</button>
@@ -1009,7 +1036,7 @@ POS_HTML = """
     {% else %}
     <form method="POST" action="/pos/draw">
       <div class="form-group">
-        <label class="label">المبلغ (ر.س)</label>
+        <label class="label">المبلغ (د.أ)</label>
         <input class="input" name="amount" type="number" step="0.5" min="0" placeholder="0.00" required>
       </div>
       <div class="form-group">
@@ -1029,7 +1056,7 @@ POS_HTML = """
         <div style="font-weight:700;">{{ dr['employee'] }}</div>
         <div style="font-size:11px;color:var(--text2);">{{ dr['note'] or '—' }} · {{ dr['created_at'][11:16] }}</div>
       </div>
-      <div style="color:#c39bd3;font-weight:700;">−{{ "%.2f"|format(dr['amount']) }} ر.س</div>
+      <div style="color:#c39bd3;font-weight:700;">−{{ "%.2f"|format(dr['amount']) }} د.أ</div>
     </div>
     {% endfor %}
     {% if not draws %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد سحوبات اليوم</div>{% endif %}
@@ -1078,12 +1105,14 @@ def pos_submit():
     if not items:
         return jsonify({"ok": False, "error": "لا يوجد أصناف"})
     total = sum(i["price"] * i["qty"] for i in items)
+    delivery = data.get("delivery", False)
+    source = "staff_uni" if delivery else data.get("source", "staff")
     conn  = get_db()
     oid = exe_returning(conn,
         "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (day["id"], total, data.get("payment","نقدي"), "pending",
-         data.get("source","staff"), session.get("user_name",""),
+         source, session.get("user_name",""),
          data.get("note",""), now_str()))
     for it in items:
         exe(conn,
@@ -1387,11 +1416,15 @@ CUSTOMER_HTML = """
     {% set cat_items = items | selectattr('category','equalto',cat_key) | list %}
     {% if cat_items %}
     <div class="cust-cat-section">
-      <div class="cust-cat-header">
-        <img src="{{ category_img[cat_key] }}" alt="{{ cat_label }}" loading="lazy"
-             onerror="this.style.display='none';this.parentElement.style.background='{{ category_gradient[cat_key] }}'">
-        <div class="cust-cat-label">{{ cat_label }}</div>
+      <div class="cust-cat-header" onclick="var el = document.getElementById('cust-cat-{{ cat_key }}'); el.style.display = el.style.display === 'none' ? 'block' : 'none';" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <img src="{{ category_img[cat_key] }}" alt="{{ cat_label }}" loading="lazy"
+               onerror="this.style.display='none';this.parentElement.style.background='{{ category_gradient[cat_key] }}'" style="width:40px; height:40px; border-radius:8px; object-fit:cover;">
+          <div class="cust-cat-label" style="font-weight:700; font-size:16px;">{{ cat_label }}</div>
+        </div>
+        <span style="font-size:12px;color:rgba(255,255,255,0.6);margin-left:10px;">▼</span>
       </div>
+      <div id="cust-cat-{{ cat_key }}" style="display:none; margin-top:10px;">
       {% for item in cat_items %}
       <div class="cust-item" style="padding:0;overflow:hidden;border-radius:12px;margin-bottom:10px;flex-direction:column;align-items:stretch;background:var(--surface2);border:1px solid var(--border);">
         {% if item['image'] %}
@@ -1401,23 +1434,30 @@ CUSTOMER_HTML = """
                loading="lazy">
           <div style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.7));padding:8px 12px;">
             <div style="font-weight:900;font-size:16px;color:#fff;">{{ item['name'] }}</div>
-            <div style="font-size:13px;color:var(--accent2);font-weight:700;">{{ "%.2f"|format(item['price']) }} ر.س</div>
+            {% if item.get('description') %}
+            <div style="font-size:12px;color:rgba(255,255,255,0.8);margin-top:2px;">{{ item['description'] }}</div>
+            {% endif %}
+            <div style="font-size:13px;color:var(--accent2);font-weight:700;margin-top:2px;">{{ "%.2f"|format(item['price']) }} د.أ</div>
           </div>
-          <button class="cust-add-btn" style="position:absolute;top:10px;left:10px;"
+          <button class="cust-add-btn" style="position:absolute;top:10px;left:10px;width:34px;height:34px;border-radius:17px;font-size:20px;display:flex;align-items:center;justify-content:center;border:none;background:var(--accent);color:#000;font-weight:900;cursor:pointer;"
             onclick="addToCustomerCart('{{ item['name']|replace("'", "\\'") }}', {{ item['price'] }})">+</button>
         </div>
         {% else %}
         <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;gap:12px;">
           <div style="flex:1;">
-            <div class="cust-item-name">{{ item['name'] }}</div>
-            <div class="cust-item-price">{{ "%.2f"|format(item['price']) }} ر.س</div>
+            <div class="cust-item-name" style="font-weight:700;font-size:16px;">{{ item['name'] }}</div>
+            {% if item.get('description') %}
+            <div style="font-size:12px;color:var(--text2);margin-top:2px;">{{ item['description'] }}</div>
+            {% endif %}
+            <div class="cust-item-price" style="font-size:13px;color:var(--accent2);font-weight:700;margin-top:4px;">{{ "%.2f"|format(item['price']) }} د.أ</div>
           </div>
-          <button class="cust-add-btn"
+          <button class="cust-add-btn" style="width:34px;height:34px;border-radius:17px;font-size:20px;display:flex;align-items:center;justify-content:center;border:none;background:var(--accent);color:#000;font-weight:900;cursor:pointer;"
             onclick="addToCustomerCart('{{ item['name']|replace("'", "\\'") }}', {{ item['price'] }})">+</button>
         </div>
         {% endif %}
       </div>
       {% endfor %}
+      </div>
     </div>
     {% endif %}
   {% endfor %}
@@ -1431,7 +1471,7 @@ CUSTOMER_HTML = """
 <div id="customerCartSection" class="cust-cart-bar" style="display:none;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
     <div style="font-weight:900;font-size:15px;color:var(--text);">🛒 طلبك <span id="customerCartCount" style="background:var(--accent);color:#000;border-radius:20px;padding:1px 9px;font-size:12px;"></span></div>
-    <span id="customerCartTotal" style="font-weight:900;font-size:18px;color:var(--accent2);">0.00 ر.س</span>
+    <span id="customerCartTotal" style="font-weight:900;font-size:18px;color:var(--accent2);">0.00 د.أ</span>
   </div>
 
   <div id="customerCartItems"></div>
@@ -1444,6 +1484,13 @@ CUSTOMER_HTML = """
       <button class="cust-pay-btn" onclick="selectPay(this,'بطاقة')">💳 بطاقة</button>
       <button class="cust-pay-btn" onclick="selectPay(this,'دفع إلكتروني')">📱 إلكتروني</button>
     </div>
+  </div>
+
+  <div style="margin-top:12px; margin-bottom:12px; background:rgba(255,255,255,0.05); padding:12px; border-radius:10px; border:1px solid rgba(255,255,255,0.1);">
+    <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+      <input type="checkbox" id="custUniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
+      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل للجامعة</span>
+    </label>
   </div>
 
   <input class="input" id="customerNote" placeholder="ملاحظة: مثلاً بدون سكر..." style="margin-bottom:10px;background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1);">
@@ -1475,6 +1522,7 @@ function submitCustomerOrder() {
       items: cart,
       note: note ? note.value : '',
       payment: selectedPayMethod,
+      delivery: document.getElementById('custUniDelivery') ? document.getElementById('custUniDelivery').checked : false,
     })
   }).then(r => r.json()).then(d => {
     if (d.ok) {
@@ -1501,7 +1549,7 @@ def customer():
     items = []
     for item in raw:
         d = dict(item)
-        d["image"] = get_item_image(d["name"])
+        d["image"] = d.get("image_b64") or get_item_image(d["name"])
         items.append(d)
     return render(CUSTOMER_HTML, items=items, open=bool(day))
 
@@ -1516,11 +1564,13 @@ def customer_submit():
         return jsonify({"ok": False, "error": "لا يوجد أصناف"})
     total   = sum(i["price"] * i["qty"] for i in items)
     payment = data.get("payment", "نقدي")
+    delivery = data.get("delivery", False)
+    source = "customer_uni" if delivery else "customer"
     conn    = get_db()
     oid = exe_returning(conn,
         "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (day["id"], total, payment, "pending", "customer", "زبون", data.get("note",""), now_str()))
+        (day["id"], total, payment, "pending", source, "زبون", data.get("note",""), now_str()))
     for it in items:
         exe(conn,
             "INSERT INTO order_items (order_id, item_name, price, qty, note) VALUES (%s,%s,%s,%s,%s)",
@@ -1549,6 +1599,7 @@ ADMIN_HTML = """
   <button class="nav-tab" onclick="switchAdminTab('draws', this)" style="color:#c39bd3;">💜 سحوبات</button>
   <button class="nav-tab" onclick="switchAdminTab('qr', this)">📱 QR</button>
   <button class="nav-tab" onclick="switchAdminTab('report', this)">📊 تقرير</button>
+  <button class="nav-tab" onclick="switchAdminTab('monthly', this)">🗓️ شهري</button>
 </div>
 
 <!-- DAY TAB -->
@@ -1557,7 +1608,7 @@ ADMIN_HTML = """
   <div class="alert alert-success">✅ اليوم مفتوح منذ {{ day['started_at'][11:16] }}</div>
   <div class="stat-row">
     <div class="stat"><div class="stat-val">{{ orders|length }}</div><div class="stat-label">الطلبات</div></div>
-    <div class="stat"><div class="stat-val">{{ "%.0f"|format(total_sales) }} ر.س</div><div class="stat-label">المبيعات</div></div>
+    <div class="stat"><div class="stat-val">{{ "%.0f"|format(total_sales) }} د.أ</div><div class="stat-label">المبيعات</div></div>
   </div>
   <form method="POST" action="/admin/day/close">
     <button class="btn btn-red" type="submit" onclick="return confirm('هل تريد إغلاق اليوم؟')">🔒 إغلاق اليوم</button>
@@ -1575,7 +1626,7 @@ ADMIN_HTML = """
     {% for d in prev_days %}
     <div class="list-item">
       <span style="font-size:12px;color:var(--text2);">{{ d['started_at'][:10] }}</span>
-      <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(d['sales'] or 0) }} ر.س</span>
+      <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(d['sales'] or 0) }} د.أ</span>
     </div>
     {% endfor %}
   </div>
@@ -1593,7 +1644,7 @@ ADMIN_HTML = """
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label class="label">السعر (ر.س)</label>
+          <label class="label">السعر (د.أ)</label>
           <input class="input" name="price" type="number" step="0.5" min="0" placeholder="0.00" required>
         </div>
         <div class="form-group">
@@ -1602,6 +1653,14 @@ ADMIN_HTML = """
             {% for k,v in categories.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
           </select>
         </div>
+      </div>
+      <div class="form-group">
+        <label class="label">الوصف (اختياري)</label>
+        <input class="input" name="description" placeholder="وصف المشروب...">
+      </div>
+      <div class="form-group">
+        <label class="label">رابط الصورة (اختياري)</label>
+        <textarea class="input" name="image_b64" placeholder="رابط الصورة أو مسار Base64..."></textarea>
       </div>
       <button class="btn btn-primary" type="submit">+ إضافة</button>
     </form>
@@ -1622,7 +1681,7 @@ ADMIN_HTML = """
       <div class="list-item">
         <div>
           <div style="font-weight:700;">{{ item['name'] }}</div>
-          <div style="font-size:13px;color:var(--accent2);">{{ "%.2f"|format(item['price']) }} ر.س</div>
+          <div style="font-size:13px;color:var(--accent2);">{{ "%.2f"|format(item['price']) }} د.أ</div>
         </div>
         <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
           <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
@@ -1641,7 +1700,7 @@ ADMIN_HTML = """
     <form method="POST" action="/admin/expenses/add">
       <div class="form-row">
         <div class="form-group">
-          <label class="label">المبلغ (ر.س)</label>
+          <label class="label">المبلغ (د.أ)</label>
           <input class="input" name="amount" type="number" step="0.5" min="0" placeholder="0.00" required>
         </div>
         <div class="form-group">
@@ -1661,7 +1720,7 @@ ADMIN_HTML = """
         <div style="font-weight:700;">{{ ex['reason'] }}</div>
         <div style="font-size:11px;color:var(--text2);">{{ ex['employee'] }} · {{ ex['created_at'][11:16] }}</div>
       </div>
-      <div style="color:var(--red);font-weight:700;">−{{ "%.2f"|format(ex['amount']) }} ر.س</div>
+      <div style="color:var(--red);font-weight:700;">−{{ "%.2f"|format(ex['amount']) }} د.أ</div>
     </div>
     {% endfor %}
     {% if not expenses %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد مصاريف</div>{% endif %}
@@ -1677,7 +1736,7 @@ ADMIN_HTML = """
     </div>
     <div class="stat">
       <div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div>
-      <div class="stat-label">إجمالي السحوبات (ر.س)</div>
+      <div class="stat-label">إجمالي السحوبات (د.أ)</div>
     </div>
   </div>
   <div class="card" style="border-color:rgba(142,68,173,0.3);">
@@ -1688,7 +1747,7 @@ ADMIN_HTML = """
         <div style="font-weight:700;">{{ dr['employee'] }}</div>
         <div style="font-size:11px;color:var(--text2);">{{ dr['note'] or '—' }} · {{ dr['created_at'][11:16] }}</div>
       </div>
-      <div style="color:#c39bd3;font-weight:700;">−{{ "%.2f"|format(dr['amount']) }} ر.س</div>
+      <div style="color:#c39bd3;font-weight:700;">−{{ "%.2f"|format(dr['amount']) }} د.أ</div>
     </div>
     {% endfor %}
     {% if not draws %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد سحوبات اليوم</div>{% endif %}
@@ -1709,12 +1768,12 @@ ADMIN_HTML = """
 <!-- REPORT TAB -->
 <div id="atab-report" class="page" style="display:none;">
   <div class="stat-row">
-    <div class="stat"><div class="stat-val" style="color:var(--accent2);">{{ "%.2f"|format(total_sales) }}</div><div class="stat-label">المبيعات (ر.س)</div></div>
-    <div class="stat"><div class="stat-val" style="color:var(--red);">{{ "%.2f"|format(total_expenses) }}</div><div class="stat-label">المصاريف (ر.س)</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--accent2);">{{ "%.2f"|format(total_sales) }}</div><div class="stat-label">المبيعات (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--red);">{{ "%.2f"|format(total_expenses) }}</div><div class="stat-label">المصاريف (د.أ)</div></div>
   </div>
   <div class="stat-row">
-    <div class="stat"><div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div><div class="stat-label">السحوبات (ر.س)</div></div>
-    <div class="stat"><div class="stat-val" style="color:{% if net >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(net) }}</div><div class="stat-label">صافي الربح (ر.س)</div></div>
+    <div class="stat"><div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div><div class="stat-label">السحوبات (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:{% if net >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(net) }}</div><div class="stat-label">صافي الربح (د.أ)</div></div>
   </div>
   <div class="card">
     <div class="card-title">الطلبات المكتملة</div>
@@ -1724,10 +1783,44 @@ ADMIN_HTML = """
         <div style="font-weight:700;font-family:monospace;color:var(--accent2);">#{{ o['id'] }}</div>
         <div style="font-size:11px;color:var(--text2);">{{ o['payment'] }} · {{ o['employee'] }} · {{ o['created_at'][11:16] }}</div>
       </div>
-      <div style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(o['total']) }} ر.س</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(o['total']) }} د.أ</div>
+        <form method="POST" action="/admin/orders/delete/{{ o['id'] }}" style="margin:0;">
+          <button type="submit" class="btn btn-red btn-sm" style="padding:4px 8px; min-height: 28px;" onclick="return confirm('حذف الطلب نهائياً؟')">🗑️</button>
+        </form>
+      </div>
     </div>
     {% endfor %}
     {% if not orders %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد طلبات</div>{% endif %}
+  </div>
+</div>
+
+<!-- MONTHLY TAB -->
+<div id="atab-monthly" class="page" style="display:none;">
+  <div class="card">
+    <div class="card-title">التقرير الشهري المفصل</div>
+    {% for m in monthly_list %}
+    <div class="list-item" style="flex-direction:column;align-items:flex-start;gap:6px;border-color:var(--border);background:var(--surface2);padding:12px;border-radius:10px;margin-bottom:10px;">
+      <div style="font-weight:900;font-size:16px;color:var(--text);margin-bottom:4px;border-bottom:1px solid var(--border);width:100%;padding-bottom:4px;">شهر: {{ m['month'] }}</div>
+      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
+        <span style="color:var(--text2);">المبيعات:</span>
+        <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(m['sales']) }} د.أ</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
+        <span style="color:var(--text2);">المصاريف:</span>
+        <span style="font-weight:700;color:var(--red);">{{ "%.2f"|format(m['exp']) }} د.أ</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
+        <span style="color:var(--text2);">السحوبات:</span>
+        <span style="font-weight:700;color:#c39bd3;">{{ "%.2f"|format(m['draws']) }} د.أ</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;width:100%;font-size:14px;margin-top:4px;border-top:1px dashed rgba(255,255,255,0.1);padding-top:6px;">
+        <span style="font-weight:700;color:var(--text);">الصافي:</span>
+        <span style="font-weight:900;color:{% if m['net'] >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(m['net']) }} د.أ</span>
+      </div>
+    </div>
+    {% endfor %}
+    {% if not monthly_list %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد بيانات</div>{% endif %}
   </div>
 </div>
 
@@ -1771,6 +1864,32 @@ def admin():
         WHERE d.status='closed' GROUP BY d.id ORDER BY d.id DESC LIMIT 7
     """).fetchall()
     prev_days = [dict(r) for r in prev_raw]
+
+    monthly_stats = {}
+    all_orders = qry(conn, "SELECT created_at, total FROM orders WHERE status='closed'").fetchall()
+    all_exp    = qry(conn, "SELECT created_at, amount FROM expenses").fetchall()
+    all_draws  = qry(conn, "SELECT created_at, amount FROM draws").fetchall()
+    
+    for r in all_orders:
+        m = r["created_at"][:7] if r["created_at"] else "Unknown"
+        if m not in monthly_stats: monthly_stats[m] = {"sales":0, "exp":0, "draws":0, "net":0}
+        monthly_stats[m]["sales"] += r["total"]
+        monthly_stats[m]["net"] += r["total"]
+
+    for r in all_exp:
+        m = r["created_at"][:7] if r["created_at"] else "Unknown"
+        if m not in monthly_stats: monthly_stats[m] = {"sales":0, "exp":0, "draws":0, "net":0}
+        monthly_stats[m]["exp"] += r["amount"]
+        monthly_stats[m]["net"] -= r["amount"]
+
+    for r in all_draws:
+        m = r["created_at"][:7] if r["created_at"] else "Unknown"
+        if m not in monthly_stats: monthly_stats[m] = {"sales":0, "exp":0, "draws":0, "net":0}
+        monthly_stats[m]["draws"] += r["amount"]
+        monthly_stats[m]["net"] -= r["amount"]
+    
+    monthly_list = sorted([{"month": k, **v} for k,v in monthly_stats.items()], key=lambda x: x["month"], reverse=True)
+
     conn.close()
 
     host         = request.host_url.rstrip("/")
@@ -1781,8 +1900,19 @@ def admin():
         total_sales=total_sales, total_expenses=total_expenses,
         total_draws=total_draws,
         net=total_sales - total_expenses - total_draws,
-        prev_days=prev_days, customer_url=customer_url,
+        prev_days=prev_days, monthly_list=monthly_list, customer_url=customer_url,
         user_name=session["user_name"], msg=msg)
+
+@app.route("/admin/orders/delete/<int:oid>", methods=["POST"])
+@login_required
+@admin_required
+def order_delete(oid):
+    conn = get_db()
+    exe(conn, "DELETE FROM order_items WHERE order_id=%s", (oid,))
+    exe(conn, "DELETE FROM orders WHERE id=%s", (oid,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم حذف الطلب بنجاح#atab-report")
 
 @app.route("/admin/day/start", methods=["POST"])
 @login_required
@@ -1810,12 +1940,14 @@ def day_close():
 @login_required
 @admin_required
 def menu_add():
-    name     = request.form.get("name", "").strip()
-    price    = float(request.form.get("price", 0))
-    category = request.form.get("category", "hot_coffee")
+    name        = request.form.get("name", "").strip()
+    price       = float(request.form.get("price", 0))
+    category    = request.form.get("category", "hot_coffee")
+    description = request.form.get("description", "").strip()
+    image_b64   = request.form.get("image_b64", "").strip()
     if name and price > 0:
         conn = get_db()
-        exe(conn, "INSERT INTO menu_items (name, price, category) VALUES (%s,%s,%s)", (name, price, category))
+        exe(conn, "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)", (name, price, category, description, image_b64))
         conn.commit()
         conn.close()
     return redirect("/admin?msg=تم إضافة الصنف#atab-menu")
