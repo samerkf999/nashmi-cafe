@@ -133,7 +133,8 @@ def init_db():
             source     TEXT   DEFAULT 'staff',
             employee   TEXT,
             note       TEXT,
-            created_at TEXT
+            created_at TEXT,
+            delivery   TEXT   DEFAULT ''
         )""",
         f"""CREATE TABLE IF NOT EXISTS order_items (
             id         {id_col},
@@ -973,7 +974,7 @@ POS_HTML = """
     <div class="form-group" style="margin-top:12px; background:var(--surface2); padding:12px; border-radius:10px; border:1px solid var(--border);">
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
         <input type="checkbox" id="uniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
-        <span style="font-weight:700;font-size:15px;">🎓 توصيل</span>
+        <span style="font-weight:700;font-size:15px;">🎓 توصيل للجامعة</span>
       </label>
     </div>
   </div>
@@ -1000,7 +1001,7 @@ POS_HTML = """
           <span style="font-family:monospace;color:var(--accent2);font-weight:700;">#{{ o['id'] }}</span>
           <span style="font-size:11px;color:var(--text2);margin-right:8px;">{{ o['created_at'][-8:-3] }}</span>
           {% if 'customer' in o['source'] %}<span class="badge" style="font-size:10px;background:var(--blue);color:#fff;">زبون</span>{% endif %}
-          {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🚗 توصيل</span>{% endif %}
+          {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🎓 جامعة</span>{% endif %}
         </div>
         <span class="badge {% if o['status']=='pending' %}{% else %}badge-green{% endif %}">
           {{ 'قيد التنفيذ' if o['status']=='pending' else 'مكتمل' }}
@@ -1492,7 +1493,7 @@ CUSTOMER_HTML = """
   <div style="margin-top:12px; margin-bottom:12px; background:rgba(255,255,255,0.05); padding:12px; border-radius:10px; border:1px solid rgba(255,255,255,0.1);">
     <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
       <input type="checkbox" id="custUniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
-      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل</span>
+      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل للجامعة</span>
     </label>
   </div>
 
@@ -1565,15 +1566,21 @@ def customer_submit():
     items = data.get("items", [])
     if not items:
         return jsonify({"ok": False, "error": "لا يوجد أصناف"})
-    total   = sum(i["price"] * i["qty"] for i in items)
-    payment = data.get("payment", "نقدي")
-    delivery = data.get("delivery", False)
+    total    = sum(i["price"] * i["qty"] for i in items)
+    payment  = data.get("payment", "نقدي")
+    delivery = data.get("delivery", "")
+    # delivery may be bool (old) or string (new)
+    if delivery is True:
+        delivery = "جامعة"
+    elif delivery is False or delivery is None:
+        delivery = ""
     source = "customer_uni" if delivery else "customer"
-    conn    = get_db()
+    conn   = get_db()
     oid = exe_returning(conn,
-        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (day["id"], total, payment, "pending", source, "زبون", data.get("note",""), now_str()))
+        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at, delivery) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (day["id"], total, payment, "pending", source, "زبون",
+         data.get("note",""), now_str(), delivery))
     for it in items:
         exe(conn,
             "INSERT INTO order_items (order_id, item_name, price, qty, note) VALUES (%s,%s,%s,%s,%s)",
@@ -1646,7 +1653,7 @@ ADMIN_HTML = """
 <div id="atab-menu" class="page" style="display:none;">
   <div class="card">
     <div class="card-title">➕ إضافة صنف جديد</div>
-    <form method="POST" action="/admin/menu/add">
+    <form method="POST" action="/admin/menu/add" enctype="multipart/form-data">
       <div class="form-group">
         <label class="label">اسم الصنف</label>
         <input class="input" name="name" placeholder="مثال: قهوة تركية" required>
@@ -1668,8 +1675,10 @@ ADMIN_HTML = """
         <input class="input" name="description" placeholder="وصف المشروب...">
       </div>
       <div class="form-group">
-        <label class="label">رابط الصورة (اختياري)</label>
-        <textarea class="input" name="image_b64" placeholder="رابط الصورة أو مسار Base64..."></textarea>
+        <label class="label">📸 صورة المشروب (اختياري)</label>
+        <input class="input" name="image" type="file" accept="image/*" style="padding:8px;font-size:14px;">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;">أو الصق رابط الصورة أدناه</div>
+        <input class="input" name="image_b64" placeholder="https://... أو data:image/..." style="margin-top:6px;font-size:13px;">
       </div>
       <button class="btn btn-primary" type="submit">+ إضافة</button>
     </form>
@@ -1687,14 +1696,18 @@ ADMIN_HTML = """
       {% if cat_items %}
       <div class="cat-title">{{ cat_label }}</div>
       {% for item in cat_items %}
-      <div class="list-item">
-        <div>
+      <div class="list-item" style="flex-wrap:wrap;gap:8px;">
+        <div style="flex:1;min-width:0;">
           <div style="font-weight:700;">{{ item['name'] }}</div>
-          <div style="font-size:13px;color:var(--accent2);">{{ "%.2f"|format(item['price']) }} د.أ</div>
+          <div style="font-size:13px;color:var(--accent2);">{{ "%.3f"|format(item['price']) }} د.أ</div>
+          {% if item.get('description') %}<div style="font-size:11px;color:var(--text2);margin-top:2px;">{{ item['description'][:55] }}{% if item['description']|length > 55 %}...{% endif %}</div>{% endif %}
         </div>
-        <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
-          <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
-        </form>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+          <button class="btn btn-outline btn-sm" onclick="editPrice({{ item['id'] }},{{ item['price'] }})">✏️ السعر</button>
+          <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
+            <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
+          </form>
+        </div>
       </div>
       {% endfor %}
       {% endif %}
@@ -1840,6 +1853,18 @@ function switchAdminTab(name, btn) {
   document.getElementById('atab-' + name).style.display = 'block';
   btn.classList.add('active');
 }
+function editPrice(id, currentPrice) {
+  const p = parseFloat(prompt('السعر الجديد (د.أ):', currentPrice));
+  if (!p || p <= 0) return;
+  fetch('/admin/menu/price/' + id, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({price: p})
+  }).then(r => r.json()).then(d => {
+    if (d.ok) location.reload();
+    else alert(d.error || 'خطأ في التحديث');
+  });
+}
 </script>
 """
 
@@ -1923,22 +1948,23 @@ def order_delete(oid):
     conn.close()
     return redirect("/admin?msg=تم حذف الطلب بنجاح#atab-report")
 
+
 @app.route("/admin/day/delete/<int:did>", methods=["POST"])
 @login_required
 @admin_required
 def day_delete(did):
     conn = get_db()
-    # Delete order items, then orders, then draws/expenses for that day, then the day itself
+    # Delete all related records then the day
     order_ids = [r["id"] for r in qry(conn, "SELECT id FROM orders WHERE day_id=%s", (did,)).fetchall()]
     for oid in order_ids:
         exe(conn, "DELETE FROM order_items WHERE order_id=%s", (oid,))
     exe(conn, "DELETE FROM orders WHERE day_id=%s", (did,))
     exe(conn, "DELETE FROM expenses WHERE day_id=%s", (did,))
     exe(conn, "DELETE FROM draws WHERE day_id=%s", (did,))
-    exe(conn, "DELETE FROM days WHERE id=%s AND status='closed'", (did,))
+    exe(conn, "DELETE FROM days WHERE id=%s", (did,))
     conn.commit()
     conn.close()
-    return redirect("/admin?msg=تم حذف اليوم بنجاح")
+    return redirect("/admin?msg=تم حذف اليوم")
 
 @app.route("/admin/day/start", methods=["POST"])
 @login_required
@@ -1966,17 +1992,39 @@ def day_close():
 @login_required
 @admin_required
 def menu_add():
+    import base64
     name        = request.form.get("name", "").strip()
     price       = float(request.form.get("price", 0))
     category    = request.form.get("category", "hot_coffee")
     description = request.form.get("description", "").strip()
-    image_b64   = request.form.get("image_b64", "").strip()
+    # Handle file upload → convert to base64 data URI
+    image_b64 = ""
+    f = request.files.get("image_file")
+    if f and f.filename:
+        data = f.read()
+        mime = f.content_type or "image/jpeg"
+        image_b64 = f"data:{mime};base64," + base64.b64encode(data).decode()
     if name and price > 0:
         conn = get_db()
-        exe(conn, "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)", (name, price, category, description, image_b64))
+        exe(conn, "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)",
+            (name, price, category, description, image_b64))
         conn.commit()
         conn.close()
     return redirect("/admin?msg=تم إضافة الصنف#atab-menu")
+
+@app.route("/admin/menu/price/<int:item_id>", methods=["POST"])
+@login_required
+@admin_required
+def menu_price(item_id):
+    data = request.json
+    price = float(data.get("price", 0))
+    if price <= 0:
+        return jsonify({"ok": False, "error": "سعر غير صحيح"})
+    conn = get_db()
+    exe(conn, "UPDATE menu_items SET price=%s WHERE id=%s", (price, item_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 @app.route("/admin/menu/delete/<int:item_id>", methods=["POST"])
 @login_required
@@ -2005,6 +2053,54 @@ def expense_add():
         conn.commit()
         conn.close()
     return redirect("/admin")
+
+@app.route("/admin/day/delete/<int:day_id>", methods=["POST"])
+@login_required
+@admin_required
+def day_delete(day_id):
+    conn = get_db()
+    # Delete order items, orders, expenses, draws for this day, then the day
+    order_ids = [r["id"] for r in qry(conn, "SELECT id FROM orders WHERE day_id=%s", (day_id,)).fetchall()]
+    for oid in order_ids:
+        exe(conn, "DELETE FROM order_items WHERE order_id=%s", (oid,))
+    exe(conn, "DELETE FROM orders WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM expenses WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM draws WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM days WHERE id=%s", (day_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم حذف اليوم بنجاح")
+
+@app.route("/admin/menu/price/<int:item_id>", methods=["POST"])
+@login_required
+@admin_required
+def menu_price(item_id):
+    data = request.json
+    price = float(data.get("price", 0))
+    if price <= 0:
+        return jsonify({"ok": False, "error": "سعر غير صحيح"})
+    conn = get_db()
+    exe(conn, "UPDATE menu_items SET price=%s WHERE id=%s", (price, item_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+@app.route("/pos/draw", methods=["POST"])
+@login_required
+def pos_draw():
+    day = current_day()
+    if not day:
+        return redirect("/pos")
+    amount = float(request.form.get("amount", 0) or 0)
+    note   = request.form.get("note", "").strip()
+    if amount > 0:
+        conn = get_db()
+        exe(conn,
+            "INSERT INTO draws (day_id, amount, employee, note, created_at) VALUES (%s,%s,%s,%s,%s)",
+            (day["id"], amount, session["user_name"], note, now_str()))
+        conn.commit()
+        conn.close()
+    return redirect("/pos")
 
 @app.route("/admin/qr/image")
 @login_required
