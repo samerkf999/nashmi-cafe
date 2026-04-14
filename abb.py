@@ -769,6 +769,7 @@ CATEGORIES = {
     "hot_drinks": "🫖 مشروبات ساخنة",
     "cold_drinks": "🍹 مشروبات باردة",
     "snacks": "🍽️ وجبات خفيفة",
+    "argilee": "💨 الأراجيل",
 }
 
 CATEGORY_IMG = {
@@ -777,6 +778,7 @@ CATEGORY_IMG = {
     "hot_drinks":  "https://images.unsplash.com/photo-1597318181409-cf64d0b5d8a2?w=500&auto=format&fit=crop",
     "cold_drinks": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop",
     "snacks":      "https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=500&auto=format&fit=crop",
+    "argilee":     "https://images.unsplash.com/photo-1559181567-c3190bded457?w=500&auto=format&fit=crop",
 }
 
 CATEGORY_GRADIENT = {
@@ -785,6 +787,7 @@ CATEGORY_GRADIENT = {
     "hot_drinks":  "linear-gradient(135deg,#5a1a0e,#e67e22)",
     "cold_drinks": "linear-gradient(135deg,#0e6b3e,#2ecc71)",
     "snacks":      "linear-gradient(135deg,#4a2a0e,#c0392b)",
+    "argilee":     "linear-gradient(135deg,#1a0e2e,#6c3483)",
 }
 
 # ─── HELPERS ─────────────────────────────────────────────────────
@@ -970,7 +973,7 @@ POS_HTML = """
     <div class="form-group" style="margin-top:12px; background:var(--surface2); padding:12px; border-radius:10px; border:1px solid var(--border);">
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
         <input type="checkbox" id="uniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
-        <span style="font-weight:700;font-size:15px;">🎓 توصيل للجامعة</span>
+        <span style="font-weight:700;font-size:15px;">🎓 توصيل</span>
       </label>
     </div>
   </div>
@@ -997,7 +1000,7 @@ POS_HTML = """
           <span style="font-family:monospace;color:var(--accent2);font-weight:700;">#{{ o['id'] }}</span>
           <span style="font-size:11px;color:var(--text2);margin-right:8px;">{{ o['created_at'][-8:-3] }}</span>
           {% if 'customer' in o['source'] %}<span class="badge" style="font-size:10px;background:var(--blue);color:#fff;">زبون</span>{% endif %}
-          {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🎓 جامعة</span>{% endif %}
+          {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🚗 توصيل</span>{% endif %}
         </div>
         <span class="badge {% if o['status']=='pending' %}{% else %}badge-green{% endif %}">
           {{ 'قيد التنفيذ' if o['status']=='pending' else 'مكتمل' }}
@@ -1489,7 +1492,7 @@ CUSTOMER_HTML = """
   <div style="margin-top:12px; margin-bottom:12px; background:rgba(255,255,255,0.05); padding:12px; border-radius:10px; border:1px solid rgba(255,255,255,0.1);">
     <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
       <input type="checkbox" id="custUniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
-      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل للجامعة</span>
+      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل</span>
     </label>
   </div>
 
@@ -1624,9 +1627,15 @@ ADMIN_HTML = """
   <div class="card" style="margin-top:20px;">
     <div class="card-title">أيام سابقة</div>
     {% for d in prev_days %}
-    <div class="list-item">
-      <span style="font-size:12px;color:var(--text2);">{{ d['started_at'][:10] }}</span>
-      <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(d['sales'] or 0) }} د.أ</span>
+    <div class="list-item" style="padding:10px 0;">
+      <div>
+        <div style="font-size:13px;font-weight:700;">{{ d['started_at'][:10] }}</div>
+        <div style="font-size:11px;color:var(--text2);">{{ "%.2f"|format(d['sales'] or 0) }} د.أ</div>
+      </div>
+      <form method="POST" action="/admin/day/delete/{{ d['id'] }}" style="margin:0;">
+        <button type="submit" class="btn btn-red btn-sm" style="padding:4px 10px;min-height:30px;"
+          onclick="return confirm('حذف هذا اليوم وجميع طلباته نهائياً؟')">🗑️ حذف</button>
+      </form>
     </div>
     {% endfor %}
   </div>
@@ -1645,7 +1654,7 @@ ADMIN_HTML = """
       <div class="form-row">
         <div class="form-group">
           <label class="label">السعر (د.أ)</label>
-          <input class="input" name="price" type="number" step="0.5" min="0" placeholder="0.00" required>
+          <input class="input" name="price" type="number" step="0.01" min="0" placeholder="0.00" required>
         </div>
         <div class="form-group">
           <label class="label">الفئة</label>
@@ -1913,6 +1922,23 @@ def order_delete(oid):
     conn.commit()
     conn.close()
     return redirect("/admin?msg=تم حذف الطلب بنجاح#atab-report")
+
+@app.route("/admin/day/delete/<int:did>", methods=["POST"])
+@login_required
+@admin_required
+def day_delete(did):
+    conn = get_db()
+    # Delete order items, then orders, then draws/expenses for that day, then the day itself
+    order_ids = [r["id"] for r in qry(conn, "SELECT id FROM orders WHERE day_id=%s", (did,)).fetchall()]
+    for oid in order_ids:
+        exe(conn, "DELETE FROM order_items WHERE order_id=%s", (oid,))
+    exe(conn, "DELETE FROM orders WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM expenses WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM draws WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM days WHERE id=%s AND status='closed'", (did,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم حذف اليوم بنجاح")
 
 @app.route("/admin/day/start", methods=["POST"])
 @login_required
