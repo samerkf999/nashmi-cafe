@@ -159,7 +159,31 @@ def init_db():
             note       TEXT,
             created_at TEXT
         )""",
+        f"""CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS debts (
+            id          {id_col},
+            customer    TEXT NOT NULL,
+            amount      {num} NOT NULL,
+            reason      TEXT,
+            direction   TEXT DEFAULT 'owed',
+            employee    TEXT,
+            created_at  TEXT
+        )""",
     ]
+
+    # Safe column migrations for existing DBs
+    for _col, _tbl, _def in [
+        ("table_num", "orders", "TEXT DEFAULT ''"),
+        ("image_b64", "menu_items", "TEXT DEFAULT ''"),
+        ("description","menu_items","TEXT DEFAULT ''"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_def}")
+        except Exception:
+            pass
 
     for stmt in ddl:
         c.execute(stmt)
@@ -186,8 +210,94 @@ def init_db():
                 (name, role, pin)
             )
 
+    # Seed default settings
+    default_settings = [
+        ("water_price",   "0.250"),
+        ("shisha_price",  "5.000"),
+        ("shisha_label",  "أرجيلة"),
+        ("carwash_price", "3.000"),
+        ("carwash_label", "غسيل سيارة"),
+        ("phone",         ""),
+    ]
+    for _k, _v in default_settings:
+        try:
+            c.execute("INSERT INTO settings (key,value) VALUES (%s,%s)", (_k, _v))
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
+
+
+def get_settings():
+    conn = get_db()
+    rows = qry(conn, "SELECT key, value FROM settings").fetchall()
+    conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def save_setting(key, value):
+    conn = get_db()
+    if USE_PG:
+        exe(conn, "INSERT INTO settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", (key, value))
+    else:
+        exe(conn, "INSERT OR REPLACE INTO settings(key,value) VALUES(%s,%s)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def get_top_items(day_id=None, month=None, limit=10):
+    conn = get_db()
+    if day_id:
+        rows = qry(conn, """
+            SELECT oi.item_name,
+                   SUM(oi.qty) AS total_qty,
+                   SUM(oi.price*oi.qty) AS total_rev,
+                   COUNT(DISTINCT oi.order_id) AS order_count
+            FROM order_items oi
+            JOIN orders o ON o.id=oi.order_id
+            WHERE o.day_id=%s
+            GROUP BY oi.item_name ORDER BY total_qty DESC LIMIT %s
+        """, (day_id, limit)).fetchall()
+    elif month:
+        rows = qry(conn, """
+            SELECT oi.item_name,
+                   SUM(oi.qty) AS total_qty,
+                   SUM(oi.price*oi.qty) AS total_rev,
+                   COUNT(DISTINCT oi.order_id) AS order_count
+            FROM order_items oi
+            JOIN orders o ON o.id=oi.order_id
+            JOIN days d ON d.id=o.day_id
+            WHERE d.started_at LIKE %s
+            GROUP BY oi.item_name ORDER BY total_qty DESC LIMIT %s
+        """, (month + "%", limit)).fetchall()
+    else:
+        rows = []
+    conn.close()
+    return rows
+
+
+def get_payment_breakdown(day_id=None, month=None):
+    """Return {cash, card, electronic} totals."""
+    conn = get_db()
+    if day_id:
+        rows = qry(conn,
+            "SELECT payment, SUM(total) AS t FROM orders WHERE day_id=%s GROUP BY payment",
+            (day_id,)).fetchall()
+    elif month:
+        rows = qry(conn,"""
+            SELECT o.payment, SUM(o.total) AS t
+            FROM orders o JOIN days d ON d.id=o.day_id
+            WHERE d.started_at LIKE %s GROUP BY o.payment
+        """, (month+"%",)).fetchall()
+    else:
+        rows = []
+    conn.close()
+    result = {"نقدي": 0.0, "بطاقة": 0.0, "دفع إلكتروني": 0.0}
+    for r in rows:
+        k = r["payment"] or "نقدي"
+        result[k] = result.get(k, 0.0) + (r["t"] or 0.0)
+    return result
 
 
 def current_day():
@@ -661,22 +771,24 @@ function renderCart() {
 function submitOrder() {
   const cart = JSON.parse(localStorage.getItem('cart') || '[]');
   if (!cart.length) return;
-  const pay = document.getElementById('payMethod');
-  const note = document.getElementById('orderNote');
+  const pay   = document.getElementById('payMethod');
+  const note  = document.getElementById('orderNote');
+  const tbl   = document.getElementById('tableNum');
   fetch('/pos/submit', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       items: cart,
-      payment: pay ? pay.value : 'نقدي',
-      note: note ? note.value : '',
-      delivery: document.getElementById('uniDelivery') ? document.getElementById('uniDelivery').checked : false,
+      payment:   pay  ? pay.value  : 'نقدي',
+      note:      note ? note.value : '',
+      table_num: tbl  ? tbl.value  : '',
       source: 'staff'
     })
   }).then(r => r.json()).then(d => {
     if (d.ok) {
       localStorage.removeItem('cart');
       renderCart();
+      if (tbl) tbl.value = '';
       const msg = document.getElementById('orderMsg');
       if (msg) { msg.style.display='block'; setTimeout(()=>msg.style.display='none', 3000); }
     }
@@ -778,6 +890,7 @@ CATEGORY_IMG = {
     "hot_drinks":  "https://images.unsplash.com/photo-1597318181409-cf64d0b5d8a2?w=500&auto=format&fit=crop",
     "cold_drinks": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop",
     "snacks":      "https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=500&auto=format&fit=crop",
+    "carwash":     "https://images.unsplash.com/photo-1520340356584-f9917d1eea6f?w=500&auto=format&fit=crop",
     "argilee":     "https://images.unsplash.com/photo-1559181567-c3190bded457?w=500&auto=format&fit=crop",
 }
 
@@ -897,7 +1010,7 @@ POS_HTML = """
 <div class="topbar">
   <div>
     <div class="topbar-title">☕ Nashmi Café</div>
-    <div class="topbar-sub">{{ user_name }} · {{ 'مدير' if user_role=='admin' else 'موظف' }}</div>
+    <div class="topbar-sub">{{ user_name }} · {{ 'مدير' if user_role=='admin' else 'موظف' }}{% if phone %} · 📞 {{ phone }}{% endif %}</div>
   </div>
   <div class="topbar-right">
     {% if user_role == 'admin' %}<a href="/admin" class="btn btn-outline btn-sm">⚙️ إدارة</a>{% endif %}
@@ -969,6 +1082,10 @@ POS_HTML = """
     <div class="form-group">
       <label class="label">ملاحظة (اختياري)</label>
       <input class="input" id="orderNote" placeholder="مثال: بدون سكر...">
+    </div>
+    <div class="form-group">
+      <label class="label">🪑 رقم الطاولة (اختياري)</label>
+      <input class="input" id="tableNum" type="text" inputmode="numeric" placeholder="مثال: 5">
     </div>
     <div class="form-group" style="margin-top:12px; background:var(--surface2); padding:12px; border-radius:10px; border:1px solid var(--border);">
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
@@ -1092,10 +1209,12 @@ def pos():
             orders.append({**dict(o), "items": [dict(i) for i in its]})
         draws = [dict(d) for d in qry(conn, "SELECT * FROM draws WHERE day_id=%s ORDER BY id DESC", (day["id"],)).fetchall()]
     conn.close()
+    settings = get_settings()
     return render(POS_HTML,
         items=items, day=day, orders=orders, draws=draws,
         user_name=session["user_name"],
-        user_role=session["user_role"])
+        user_role=session["user_role"],
+        phone=settings.get("phone",""))
 
 @app.route("/pos/submit", methods=["POST"])
 @login_required
@@ -1112,11 +1231,11 @@ def pos_submit():
     source = "staff_uni" if delivery else data.get("source", "staff")
     conn  = get_db()
     oid = exe_returning(conn,
-        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, table_num, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (day["id"], total, data.get("payment","نقدي"), "pending",
          source, session.get("user_name",""),
-         data.get("note",""), now_str()))
+         data.get("note",""), data.get("table_num",""), now_str()))
     for it in items:
         exe(conn,
             "INSERT INTO order_items (order_id, item_name, price, qty, note) VALUES (%s,%s,%s,%s,%s)",
@@ -1154,426 +1273,279 @@ def pos_draw():
 # ─── CUSTOMER QR PAGE ─────────────────────────────────────────────
 CUSTOMER_HTML = """
 <style>
-/* ── Customer page specific styles ── */
-.cust-hero {
-  position: relative;
-  min-height: 220px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  padding: 40px 20px 30px;
-}
-.cust-hero-bg {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(160deg, #1a0a00 0%, #3d1a00 40%, #0a0604 100%);
-}
-.cust-hero-bg::after {
-  content:'';
-  position:absolute;
-  inset:0;
-  background:
-    radial-gradient(ellipse at 30% 50%, rgba(212,136,10,0.25) 0%, transparent 60%),
-    radial-gradient(ellipse at 75% 30%, rgba(255,140,66,0.15) 0%, transparent 50%);
-}
-.cust-hero-rings {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-}
-.cust-ring {
-  position: absolute;
-  border-radius: 50%;
-  border: 1px solid rgba(212,136,10,0.12);
-  animation: ringPulse ease-in-out infinite;
-}
-@keyframes ringPulse {
-  0%,100% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(1.05); opacity: 0.3; }
-}
-.cust-logo {
-  position: relative;
-  z-index: 2;
-  text-align: center;
-}
-.cust-logo-icon {
-  font-size: 56px;
-  display: block;
-  margin-bottom: 10px;
-  filter: drop-shadow(0 0 20px rgba(212,136,10,0.6));
-  animation: iconFloat 3s ease-in-out infinite;
-}
-@keyframes iconFloat {
-  0%,100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
-}
-.cust-logo-name {
-  font-size: 32px;
-  font-weight: 900;
-  background: linear-gradient(135deg, #f5b835, #ff8c42, #f5b835);
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: shimmer 3s linear infinite;
-}
-@keyframes shimmer {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 200% 50%; }
-}
-.cust-logo-sub {
-  font-size: 14px;
-  color: rgba(255,220,160,0.7);
-  margin-top: 6px;
-  letter-spacing: 1px;
-}
-
-.cust-cat-header {
-  position: relative;
-  height: 110px;
-  border-radius: 14px 14px 0 0;
-  overflow: hidden;
-  margin-bottom: 0;
-}
-.cust-cat-header img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  filter: brightness(0.55);
-  transition: transform 0.4s;
-}
-.cust-cat-section:hover .cust-cat-header img {
-  transform: scale(1.05);
-}
-.cust-cat-label {
-  position: absolute;
-  bottom: 10px;
-  right: 14px;
-  font-size: 17px;
-  font-weight: 900;
-  color: #fff;
-  text-shadow: 0 2px 8px rgba(0,0,0,0.8);
-}
-.cust-cat-section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-  margin-bottom: 16px;
-}
-.cust-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
-  gap: 12px;
-  transition: background 0.15s;
-}
-.cust-item:last-child { border-bottom: none; }
-.cust-item:hover { background: rgba(212,136,10,0.05); }
-.cust-item-name { font-weight: 700; font-size: 15px; color: var(--text); }
-.cust-item-price {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--accent2);
-  margin-top: 2px;
-}
-.cust-add-btn {
-  background: linear-gradient(135deg, var(--accent), var(--accent3));
-  border: none;
-  color: #000;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  font-size: 20px;
-  font-weight: 700;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s;
-  box-shadow: 0 2px 8px rgba(212,136,10,0.3);
-}
-.cust-add-btn:hover { transform: scale(1.15); box-shadow: 0 4px 16px rgba(212,136,10,0.5); }
-
-.cust-cart-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 100;
-  padding: 14px 16px;
-  padding-bottom: calc(14px + var(--safe-bottom));
-  background: rgba(15,8,4,0.97);
-  border-top: 1px solid rgba(212,136,10,0.3);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  max-width: 540px;
-  margin: 0 auto;
-}
-.cust-pay-methods {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
-.cust-pay-btn {
-  flex: 1 1 80px;
-  padding: 9px 6px;
-  min-height: 40px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface2);
-  color: var(--text2);
-  font-family: 'Cairo', sans-serif;
-  font-size: clamp(12px, 3.2vw, 14px);
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.15s;
-  text-align: center;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-}
-.cust-pay-btn.active {
-  border-color: var(--accent);
-  color: var(--accent2);
-  background: rgba(212,136,10,0.12);
-}
-
-.cust-closed {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 60vh;
-  text-align: center;
-  padding: 40px 20px;
-}
-
-.cust-success {
-  display: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 70vh;
-  text-align: center;
-  padding: 40px 20px;
-}
-
-@keyframes successPop {
-  0% { transform: scale(0.5); opacity: 0; }
-  80% { transform: scale(1.1); }
-  100% { transform: scale(1); opacity: 1; }
-}
-.success-icon { animation: successPop 0.5s ease forwards; }
+.cq-hero{background:linear-gradient(160deg,#1a0800,#3d1800 50%,#0a0604);text-align:center;padding:26px 16px 18px;position:relative;overflow:hidden;}
+.cq-hero::after{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 40% 60%,rgba(212,136,10,0.18),transparent 65%);pointer-events:none;}
+.cq-logo-icon{font-size:42px;display:block;margin-bottom:6px;filter:drop-shadow(0 0 14px rgba(212,136,10,0.6));}
+.cq-logo-name{font-size:24px;font-weight:900;background:linear-gradient(135deg,#f5b835,#ff8c42);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.cq-logo-sub{font-size:12px;color:rgba(255,220,160,0.6);margin-top:4px;}
+.cq-phone{font-size:13px;color:var(--accent2);margin-top:6px;font-weight:700;}
+.cq-quick{display:flex;gap:8px;padding:12px 14px 0;max-width:540px;margin:0 auto;flex-wrap:wrap;}
+.cq-quick-btn{flex:1 1 80px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:12px 6px;border-radius:12px;border:none;cursor:pointer;font-family:'Cairo',sans-serif;font-weight:700;font-size:13px;color:#fff;-webkit-tap-highlight-color:transparent;touch-action:manipulation;min-height:74px;transition:transform 0.12s;}
+.cq-quick-btn:active{transform:scale(0.93);}
+.cq-qw{background:linear-gradient(135deg,#0e4d6b,#2980b9);}
+.cq-qs{background:linear-gradient(135deg,#4a0e6b,#8e44ad);}
+.cq-qc{background:linear-gradient(135deg,#0e3a6b,#2471a3);}
+.cq-quick-icon{font-size:24px;}
+.cq-quick-price{font-size:11px;opacity:0.85;}
+.cq-section{margin:0 14px 8px;border-radius:12px;overflow:hidden;border:1px solid var(--border);}
+.cq-section-head{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;user-select:none;background:var(--surface);-webkit-tap-highlight-color:transparent;}
+.cq-section-img{width:40px;height:40px;border-radius:8px;object-fit:cover;flex-shrink:0;}
+.cq-section-label{flex:1;font-size:15px;font-weight:700;}
+.cq-section-count{font-size:11px;color:var(--text2);background:var(--surface2);border-radius:20px;padding:2px 8px;}
+.cq-section-arrow{font-size:13px;color:var(--text2);transition:transform 0.25s;flex-shrink:0;}
+.cq-section-body{display:none;background:var(--surface2);}
+.cq-item{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);}
+.cq-item:last-child{border-bottom:none;}
+.cq-item-img{width:50px;height:50px;border-radius:9px;object-fit:cover;flex-shrink:0;}
+.cq-item-info{flex:1;min-width:0;}
+.cq-item-name{font-weight:700;font-size:15px;}
+.cq-item-desc{font-size:11px;color:var(--text2);margin-top:2px;}
+.cq-item-price{font-size:13px;color:var(--accent2);font-weight:700;margin-top:3px;}
+.cq-add{width:36px;height:36px;border-radius:50%;border:none;background:linear-gradient(135deg,var(--accent),var(--accent3));color:#000;font-size:22px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;-webkit-tap-highlight-color:transparent;touch-action:manipulation;transition:transform 0.1s;}
+.cq-add:active{transform:scale(0.85);}
+.cq-cart-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;background:rgba(12,6,2,0.97);border-top:1px solid rgba(212,136,10,0.3);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);padding:12px 14px;padding-bottom:calc(12px + var(--safe-bottom));max-width:540px;margin:0 auto;}
+.cq-cart-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.cq-cart-title{font-weight:900;font-size:15px;}
+.cq-cart-total{font-weight:900;font-size:18px;color:var(--accent2);}
+.cq-cart-items{max-height:110px;overflow-y:auto;margin-bottom:8px;}
+.cq-cart-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06);}
+.cq-cart-item:last-child{border-bottom:none;}
+.cq-qty-btns{display:flex;align-items:center;gap:5px;}
+.cq-qty-btn{background:rgba(255,255,255,0.1);border:none;color:#fff;width:26px;height:26px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;}
+.cq-qty-n{font-weight:700;color:var(--accent2);min-width:18px;text-align:center;font-size:14px;}
+.cq-row{display:flex;gap:5px;margin-bottom:7px;flex-wrap:wrap;}
+.cq-opt{flex:1 1 70px;padding:7px 4px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text2);font-family:'Cairo',sans-serif;font-size:12px;font-weight:700;cursor:pointer;text-align:center;-webkit-tap-highlight-color:transparent;}
+.cq-opt.on{border-color:var(--accent);color:var(--accent2);background:rgba(212,136,10,0.12);}
+.cq-note{width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#fff;padding:9px 12px;border-radius:9px;font-family:'Cairo',sans-serif;font-size:15px;margin-bottom:8px;outline:none;}
+.cq-submit{width:100%;padding:13px;border:none;border-radius:11px;background:linear-gradient(135deg,var(--accent),var(--accent3));color:#000;font-family:'Cairo',sans-serif;font-size:16px;font-weight:900;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+.cq-submit:disabled{opacity:0.5;}
+.cq-closed{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:55vh;text-align:center;padding:40px 20px;}
+.cq-success{display:none;flex-direction:column;align-items:center;justify-content:center;min-height:65vh;text-align:center;padding:40px 20px;}
 </style>
 
-<!-- SUCCESS STATE -->
-<div id="customerSuccessMsg" class="cust-success">
-  <div class="success-icon" style="font-size:80px;margin-bottom:20px;">✅</div>
-  <div style="font-size:24px;font-weight:900;color:var(--green);margin-bottom:10px;">تم استلام طلبك!</div>
-  <div style="color:var(--text2);font-size:15px;line-height:1.7;">سيتم تحضير طلبك في أقرب وقت.<br>شكراً لزيارتك ☕</div>
-  <button onclick="localStorage.removeItem('customerCart');location.reload();"
-    style="margin-top:28px;background:linear-gradient(135deg,var(--accent),var(--accent3));border:none;color:#000;font-family:'Cairo',sans-serif;font-size:15px;font-weight:700;padding:14px 32px;border-radius:12px;cursor:pointer;">
-    🔄 طلب جديد
-  </button>
-</div>
-
-<div id="customerMenuSection">
-
-<!-- HERO HEADER -->
-<div class="cust-hero">
-  <div class="cust-hero-bg"></div>
-  <div class="cust-hero-rings">
-    <div class="cust-ring" style="width:300px;height:300px;top:50%;left:50%;transform:translate(-50%,-50%);animation-duration:4s;"></div>
-    <div class="cust-ring" style="width:200px;height:200px;top:50%;left:50%;transform:translate(-50%,-50%);animation-duration:3s;animation-delay:-1s;"></div>
-    <div class="cust-ring" style="width:120px;height:120px;top:50%;left:50%;transform:translate(-50%,-50%);animation-duration:2.5s;animation-delay:-2s;"></div>
-  </div>
-  <div class="cust-logo">
-    <span class="cust-logo-icon">☕</span>
-    <div class="cust-logo-name">Nashmi Café</div>
-    <div class="cust-logo-sub">اختر ما تحب وأرسل طلبك مباشرةً</div>
-  </div>
-</div>
-
-{% if not open %}
-<!-- CLOSED STATE -->
-<div class="cust-closed">
-  <div style="font-size:64px;margin-bottom:18px;filter:grayscale(0.5);">⏸️</div>
-  <div style="font-size:20px;font-weight:900;color:var(--text);margin-bottom:10px;">المقهى مغلق الآن</div>
-  <div style="color:var(--text2);font-size:14px;">الطلبات غير متاحة في الوقت الحالي<br>تفضل بزيارتنا خلال ساعات العمل</div>
-</div>
-
-{% else %}
-<!-- MENU -->
-<div style="padding:16px;max-width:540px;margin:0 auto;">
-
-  {% if not items %}
-  <div class="card" style="text-align:center;color:var(--muted);padding:40px;">القائمة غير متاحة حالياً</div>
+<div id="cqSuccess" class="cq-success">
+  <div style="font-size:68px;margin-bottom:16px;">✅</div>
+  <div style="font-size:22px;font-weight:900;color:var(--green);margin-bottom:8px;">تم استلام طلبك!</div>
+  <div style="color:var(--text2);font-size:14px;line-height:1.8;">سيتم التحضير قريباً ☕</div>
+  {% if settings.phone %}
+  <div style="margin-top:12px;font-size:13px;color:var(--accent2);">📞 {{ settings.phone }}</div>
   {% endif %}
+  <button onclick="localStorage.removeItem('cCart');location.reload();"
+    style="margin-top:22px;background:linear-gradient(135deg,var(--accent),var(--accent3));border:none;color:#000;font-family:'Cairo',sans-serif;font-size:15px;font-weight:700;padding:13px 28px;border-radius:11px;cursor:pointer;">
+    🔄 طلب جديد</button>
+</div>
 
-  {% for cat_key, cat_label in categories.items() %}
-    {% set cat_items = items | selectattr('category','equalto',cat_key) | list %}
-    {% if cat_items %}
-    <div class="cust-cat-section">
-      <div class="cust-cat-header" onclick="var el = document.getElementById('cust-cat-{{ cat_key }}'); el.style.display = el.style.display === 'none' ? 'block' : 'none';" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <img src="{{ category_img[cat_key] }}" alt="{{ cat_label }}" loading="lazy"
-               onerror="this.style.display='none';this.parentElement.style.background='{{ category_gradient[cat_key] }}'" style="width:40px; height:40px; border-radius:8px; object-fit:cover;">
-          <div class="cust-cat-label" style="font-weight:700; font-size:16px;">{{ cat_label }}</div>
-        </div>
-        <span style="font-size:12px;color:rgba(255,255,255,0.6);margin-left:10px;">▼</span>
-      </div>
-      <div id="cust-cat-{{ cat_key }}" style="display:none; margin-top:10px;">
-      {% for item in cat_items %}
-      <div class="cust-item" style="padding:0;overflow:hidden;border-radius:12px;margin-bottom:10px;flex-direction:column;align-items:stretch;background:var(--surface2);border:1px solid var(--border);">
-        {% if item['image'] %}
-        <div style="position:relative;height:130px;overflow:hidden;">
-          <img src="{{ item['image'] }}" alt="{{ item['name'] }}"
-               style="width:100%;height:100%;object-fit:cover;filter:brightness(0.82);"
-               loading="lazy">
-          <div style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.7));padding:8px 12px;">
-            <div style="font-weight:900;font-size:16px;color:#fff;">{{ item['name'] }}</div>
-            {% if item.get('description') %}
-            <div style="font-size:12px;color:rgba(255,255,255,0.8);margin-top:2px;">{{ item['description'] }}</div>
-            {% endif %}
-            <div style="font-size:13px;color:var(--accent2);font-weight:700;margin-top:2px;">{{ "%.2f"|format(item['price']) }} د.أ</div>
-          </div>
-          <button class="cust-add-btn" style="position:absolute;top:10px;left:10px;width:34px;height:34px;border-radius:17px;font-size:20px;display:flex;align-items:center;justify-content:center;border:none;background:var(--accent);color:#000;font-weight:900;cursor:pointer;"
-            onclick="addToCustomerCart('{{ item['name']|replace("'", "\\'") }}', {{ item['price'] }})">+</button>
-        </div>
-        {% else %}
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;gap:12px;">
-          <div style="flex:1;">
-            <div class="cust-item-name" style="font-weight:700;font-size:16px;">{{ item['name'] }}</div>
-            {% if item.get('description') %}
-            <div style="font-size:12px;color:var(--text2);margin-top:2px;">{{ item['description'] }}</div>
-            {% endif %}
-            <div class="cust-item-price" style="font-size:13px;color:var(--accent2);font-weight:700;margin-top:4px;">{{ "%.2f"|format(item['price']) }} د.أ</div>
-          </div>
-          <button class="cust-add-btn" style="width:34px;height:34px;border-radius:17px;font-size:20px;display:flex;align-items:center;justify-content:center;border:none;background:var(--accent);color:#000;font-weight:900;cursor:pointer;"
-            onclick="addToCustomerCart('{{ item['name']|replace("'", "\\'") }}', {{ item['price'] }})">+</button>
-        </div>
-        {% endif %}
-      </div>
-      {% endfor %}
-      </div>
-    </div>
+<div id="cqMain">
+  <div class="cq-hero">
+    <span class="cq-logo-icon">☕</span>
+    <div class="cq-logo-name">Nashmi Café</div>
+    <div class="cq-logo-sub">اختر ما تحب وأرسل طلبك</div>
+    {% if settings.phone %}<div class="cq-phone">📞 {{ settings.phone }}</div>{% endif %}
+  </div>
+
+  {% if not open %}
+  <div class="cq-closed">
+    <div style="font-size:52px;margin-bottom:14px;">⏸️</div>
+    <div style="font-size:18px;font-weight:900;">المقهى مغلق الآن</div>
+    <div style="color:var(--text2);font-size:13px;margin-top:6px;">تفضل بزيارتنا خلال ساعات العمل</div>
+    {% if settings.phone %}<div style="margin-top:12px;color:var(--accent2);font-size:14px;">📞 {{ settings.phone }}</div>{% endif %}
+  </div>
+  {% else %}
+
+  <!-- Quick buttons: Water / Shisha / Car wash -->
+  <div class="cq-quick">
+    <button class="cq-quick-btn cq-qw" onclick="addCQ('ماء',{{ settings.water_price|float }})">
+      <span class="cq-quick-icon">💧</span>
+      <span>ماء</span>
+      <span class="cq-quick-price">{{ "%.3f"|format(settings.water_price|float) }} د.أ</span>
+    </button>
+    <button class="cq-quick-btn cq-qs" onclick="addCQ('{{ settings.shisha_label }}',{{ settings.shisha_price|float }})">
+      <span class="cq-quick-icon">💨</span>
+      <span>{{ settings.shisha_label }}</span>
+      <span class="cq-quick-price">{{ "%.3f"|format(settings.shisha_price|float) }} د.أ</span>
+    </button>
+    <button class="cq-quick-btn cq-qc" onclick="addCQ('{{ settings.carwash_label }}',{{ settings.carwash_price|float }})">
+      <span class="cq-quick-icon">🚗</span>
+      <span>{{ settings.carwash_label }}</span>
+      <span class="cq-quick-price">{{ "%.3f"|format(settings.carwash_price|float) }} د.أ</span>
+    </button>
+  </div>
+
+  <!-- Menu accordion -->
+  <div style="padding:10px 0;max-width:540px;margin:0 auto;padding-bottom:calc(280px + var(--safe-bottom));">
+    {% if not items %}
+    <div style="text-align:center;color:var(--muted);padding:40px;">القائمة فارغة حالياً</div>
     {% endif %}
-  {% endfor %}
-
+    {% for cat_key, cat_label in categories.items() %}
+      {% set cat_items = items | selectattr('category','equalto',cat_key) | list %}
+      {% if cat_items %}
+      <div class="cq-section">
+        <div class="cq-section-head" onclick="toggleCQ('{{ cat_key }}')">
+          <img class="cq-section-img" src="{{ category_img[cat_key] }}" onerror="this.style.display='none'" loading="lazy">
+          <span class="cq-section-label">{{ cat_label }}</span>
+          <span class="cq-section-count">{{ cat_items|length }}</span>
+          <span class="cq-section-arrow" id="arr_{{ cat_key }}">▼</span>
+        </div>
+        <div class="cq-section-body" id="cat_{{ cat_key }}">
+          {% for item in cat_items %}
+          <div class="cq-item">
+            {% if item['image'] %}
+            <img class="cq-item-img" src="{{ item['image'] }}" loading="lazy">
+            {% else %}
+            <div class="cq-item-img" style="background:var(--surface3);display:flex;align-items:center;justify-content:center;font-size:20px;">☕</div>
+            {% endif %}
+            <div class="cq-item-info">
+              <div class="cq-item-name">{{ item['name'] }}</div>
+              {% if item.get('description') %}<div class="cq-item-desc">{{ item['description'] }}</div>{% endif %}
+              <div class="cq-item-price">{{ "%.3f"|format(item['price']) }} د.أ</div>
+            </div>
+            <button class="cq-add" onclick="addCQ('{{ item['name']|replace("'","\'") }}',{{ item['price'] }})">+</button>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
-<div style="height:calc(260px + var(--safe-bottom));"></div>
-{% endif %}
-</div>
 
-<!-- FLOATING CART BAR -->
-<div id="customerCartSection" class="cust-cart-bar" style="display:none;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-    <div style="font-weight:900;font-size:15px;color:var(--text);">🛒 طلبك <span id="customerCartCount" style="background:var(--accent);color:#000;border-radius:20px;padding:1px 9px;font-size:12px;"></span></div>
-    <span id="customerCartTotal" style="font-weight:900;font-size:18px;color:var(--accent2);">0.00 د.أ</span>
+<!-- Cart bar -->
+<div id="cqBar" class="cq-cart-bar" style="display:none;">
+  <div class="cq-cart-hdr">
+    <div class="cq-cart-title">🛒 طلبك <span id="cqCnt" style="background:var(--accent);color:#000;border-radius:20px;padding:1px 8px;font-size:11px;"></span></div>
+    <div class="cq-cart-total" id="cqTot">0.000 د.أ</div>
   </div>
-
-  <div id="customerCartItems"></div>
-
-  <!-- Payment method -->
-  <div style="margin:12px 0 8px;">
-    <div style="font-size:12px;color:var(--text2);font-weight:700;margin-bottom:6px;">طريقة الدفع</div>
-    <div class="cust-pay-methods" id="payMethodBtns">
-      <button class="cust-pay-btn active" onclick="selectPay(this,'نقدي')">💵 نقدي</button>
-      <button class="cust-pay-btn" onclick="selectPay(this,'بطاقة')">💳 بطاقة</button>
-      <button class="cust-pay-btn" onclick="selectPay(this,'دفع إلكتروني')">📱 إلكتروني</button>
-    </div>
+  <div class="cq-cart-items" id="cqItems"></div>
+  <!-- Table number -->
+  <div style="margin-bottom:7px;">
+    <input class="cq-note" id="cqTable" type="text" inputmode="numeric"
+           placeholder="🪑 رقم الطاولة (اختياري)" style="margin-bottom:0;">
   </div>
-
-  <div style="margin-top:12px; margin-bottom:12px; background:rgba(255,255,255,0.05); padding:12px; border-radius:10px; border:1px solid rgba(255,255,255,0.1);">
-    <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
-      <input type="checkbox" id="custUniDelivery" style="width:24px;height:24px;accent-color:var(--accent);">
-      <span style="font-weight:700;font-size:15px;color:#fff;">🎓 توصيل للجامعة</span>
-    </label>
+  <!-- Payment -->
+  <div class="cq-row" id="cqPayBtns">
+    <button class="cq-opt on" onclick="selPay(this,'نقدي')">💵 نقدي</button>
+    <button class="cq-opt" onclick="selPay(this,'بطاقة')">💳 بطاقة</button>
+    <button class="cq-opt" onclick="selPay(this,'دفع إلكتروني')">📱 إلكتروني</button>
   </div>
-
-  <input class="input" id="customerNote" placeholder="ملاحظة: مثلاً بدون سكر..." style="margin-bottom:10px;background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1);">
-  <button class="btn btn-primary" id="customerSubmitBtn" onclick="submitCustomerOrder()" style="font-size:16px;padding:14px;">
-    ✅ أرسل الطلب
-  </button>
+  <!-- Delivery -->
+  <div class="cq-row" id="cqDelBtns">
+    <button class="cq-opt on" onclick="selDel(this,'')">🏠 كشك</button>
+    <button class="cq-opt" onclick="selDel(this,'جامعة')">🎓 جامعة</button>
+    <button class="cq-opt" onclick="selDel(this,'توصيل')">🛵 توصيل</button>
+  </div>
+  <input class="cq-note" id="cqNote" placeholder="ملاحظة: بدون سكر...">
+  <button class="cq-submit" id="cqBtn" onclick="submitCQ()">✅ أرسل الطلب</button>
 </div>
 
 <script>
-var selectedPayMethod = 'نقدي';
-function selectPay(btn, method) {
-  selectedPayMethod = method;
-  document.querySelectorAll('.cust-pay-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+var cqPay='نقدي', cqDel='';
+function selPay(b,v){cqPay=v;document.querySelectorAll('#cqPayBtns .cq-opt').forEach(x=>x.classList.remove('on'));b.classList.add('on');}
+function selDel(b,v){cqDel=v;document.querySelectorAll('#cqDelBtns .cq-opt').forEach(x=>x.classList.remove('on'));b.classList.add('on');}
+function toggleCQ(k){
+  var el=document.getElementById('cat_'+k), arr=document.getElementById('arr_'+k);
+  var op=el.style.display==='block';
+  el.style.display=op?'none':'block';
+  if(arr)arr.style.transform=op?'':'rotate(180deg)';
 }
-
-// Override submitCustomerOrder to include payment
-function submitCustomerOrder() {
-  const cart = JSON.parse(localStorage.getItem('customerCart') || '[]');
-  if (!cart.length) return;
-  const note = document.getElementById('customerNote');
-  const btn = document.getElementById('customerSubmitBtn');
-  if(btn) btn.disabled = true;
-  btn.textContent = '⏳ جارٍ الإرسال...';
-  fetch('/customer/submit', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      items: cart,
-      note: note ? note.value : '',
-      payment: selectedPayMethod,
-      delivery: document.getElementById('custUniDelivery') ? document.getElementById('custUniDelivery').checked : false,
-    })
-  }).then(r => r.json()).then(d => {
-    if (d.ok) {
-      localStorage.removeItem('customerCart');
-      document.getElementById('customerCartSection').style.display = 'none';
-      document.getElementById('customerMenuSection').style.display = 'none';
-      document.getElementById('customerSuccessMsg').style.display = 'flex';
-    } else {
-      alert(d.error || 'حدث خطأ');
-      if(btn) { btn.disabled = false; btn.textContent = '✅ أرسل الطلب'; }
-    }
-  });
+function gc(){return JSON.parse(localStorage.getItem('cCart')||'[]');}
+function sc(c){localStorage.setItem('cCart',JSON.stringify(c));}
+function addCQ(name,price){
+  var c=gc(), ex=c.find(i=>i.name===name);
+  if(ex){ex.qty++;}else{c.push({name,price,qty:1});}
+  sc(c); renderCQ();
 }
+function chgCQ(name,d){
+  var c=gc(), it=c.find(i=>i.name===name);
+  if(!it)return;
+  it.qty+=d;
+  if(it.qty<=0)c=c.filter(i=>i.name!==name);
+  sc(c); renderCQ();
+}
+function renderCQ(){
+  var c=gc();
+  var bar=document.getElementById('cqBar');
+  var el=document.getElementById('cqItems');
+  var tot=document.getElementById('cqTot');
+  var cnt=document.getElementById('cqCnt');
+  var btn=document.getElementById('cqBtn');
+  if(!el)return;
+  var total=c.reduce((s,i)=>s+i.price*i.qty,0);
+  var count=c.reduce((s,i)=>s+i.qty,0);
+  if(cnt)cnt.textContent=count||'';
+  if(tot)tot.textContent=total.toFixed(3)+' د.أ';
+  if(btn)btn.disabled=!c.length;
+  if(bar)bar.style.display=c.length?'block':'none';
+  el.innerHTML=c.map(i=>`
+    <div class="cq-cart-item">
+      <div style="flex:1;font-size:13px;font-weight:700;color:#fff;">${i.name}</div>
+      <div style="font-size:12px;color:var(--accent2);margin-left:6px;">${(i.price*i.qty).toFixed(3)}</div>
+      <div class="cq-qty-btns">
+        <button class="cq-qty-btn" onclick="chgCQ('${i.name.replace(/'/g,"\'")}', -1)">−</button>
+        <span class="cq-qty-n">${i.qty}</span>
+        <button class="cq-qty-btn" onclick="chgCQ('${i.name.replace(/'/g,"\'")}', 1)">+</button>
+      </div>
+    </div>`).join('');
+}
+function submitCQ(){
+  var c=gc(); if(!c.length)return;
+  var btn=document.getElementById('cqBtn');
+  btn.disabled=true; btn.textContent='⏳ جارٍ الإرسال...';
+  var note=document.getElementById('cqNote');
+  var tbl=document.getElementById('cqTable');
+  fetch('/customer/submit',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({items:c,note:note?note.value:'',payment:cqPay,delivery:cqDel,table_num:tbl?tbl.value:''})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      localStorage.removeItem('cCart');
+      document.getElementById('cqMain').style.display='none';
+      document.getElementById('cqBar').style.display='none';
+      document.getElementById('cqSuccess').style.display='flex';
+    }else{alert(d.error||'حدث خطأ');btn.disabled=false;btn.textContent='✅ أرسل الطلب';}
+  }).catch(()=>{alert('خطأ في الاتصال');btn.disabled=false;btn.textContent='✅ أرسل الطلب';});
+}
+window.addEventListener('DOMContentLoaded',renderCQ);
 </script>
 """
-
 @app.route("/customer")
 def customer():
-    day = current_day()
+    day  = current_day()
     conn = get_db()
-    raw = qry(conn, "SELECT * FROM menu_items WHERE available=1 ORDER BY category, name").fetchall()
+    raw  = qry(conn, "SELECT * FROM menu_items WHERE available=1 ORDER BY category, name").fetchall()
     conn.close()
-    # Attach matching photo to each item
     items = []
     for item in raw:
         d = dict(item)
         d["image"] = d.get("image_b64") or get_item_image(d["name"])
         items.append(d)
-    return render(CUSTOMER_HTML, items=items, open=bool(day))
+    settings = get_settings()
+    return render(CUSTOMER_HTML, items=items, open=bool(day), settings=settings)
 
 @app.route("/customer/submit", methods=["POST"])
 def customer_submit():
-    data = request.json
-    day  = current_day()
+    data      = request.json
+    day       = current_day()
     if not day:
         return jsonify({"ok": False, "error": "المقهى مغلق"})
     items = data.get("items", [])
     if not items:
         return jsonify({"ok": False, "error": "لا يوجد أصناف"})
-    total   = sum(i["price"] * i["qty"] for i in items)
-    payment = data.get("payment", "نقدي")
-    delivery = data.get("delivery", False)
-    source = "customer_uni" if delivery else "customer"
-    conn    = get_db()
+    total     = sum(i["price"] * i["qty"] for i in items)
+    payment   = data.get("payment", "نقدي")
+    delivery  = data.get("delivery", "")
+    table_num = data.get("table_num", "").strip()
+    note      = data.get("note", "").strip()
+    if delivery:
+        note = f"[{delivery}] {note}".strip()
+    if table_num:
+        note = f"[طاولة {table_num}] {note}".strip()
+    source    = "customer_uni" if delivery == "جامعة" else ("customer_del" if delivery == "توصيل" else "customer")
+    conn      = get_db()
     oid = exe_returning(conn,
-        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (day["id"], total, payment, "pending", source, "زبون", data.get("note",""), now_str()))
+        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, table_num, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (day["id"], total, payment, "pending", source, "زبون", note, table_num, now_str()))
     for it in items:
         exe(conn,
             "INSERT INTO order_items (order_id, item_name, price, qty, note) VALUES (%s,%s,%s,%s,%s)",
@@ -1585,56 +1557,64 @@ def customer_submit():
 # ─── ADMIN ────────────────────────────────────────────────────────
 ADMIN_HTML = """
 <div class="topbar">
-  <div>
-    <div class="topbar-title">⚙️ الإدارة</div>
-    <div class="topbar-sub">{{ user_name }} · مدير</div>
+  <div class="topbar-left">
+    <div class="topbar-title">⚙️ إدارة Nashmi</div>
+    <div class="topbar-sub">{{ user_name }} · مدير{% if settings.phone %} · 📞 {{ settings.phone }}{% endif %}</div>
   </div>
   <div class="topbar-right">
     <a href="/pos" class="btn btn-outline btn-sm">🛒 POS</a>
     <a href="/logout" class="btn btn-outline btn-sm">خروج</a>
   </div>
 </div>
+{% if msg %}<div style="background:rgba(46,204,113,0.15);border-right:3px solid var(--green);padding:10px 16px;font-size:13px;color:var(--green);">{{ msg }}</div>{% endif %}
 
 <div class="nav-tabs">
-  <button class="nav-tab active" onclick="switchAdminTab('day', this)">📅 اليوم</button>
-  <button class="nav-tab" onclick="switchAdminTab('menu', this)">📋 القائمة</button>
-  <button class="nav-tab" onclick="switchAdminTab('expenses', this)">💸 مصاريف</button>
-  <button class="nav-tab" onclick="switchAdminTab('draws', this)" style="color:#c39bd3;">💜 سحوبات</button>
-  <button class="nav-tab" onclick="switchAdminTab('qr', this)">📱 QR</button>
-  <button class="nav-tab" onclick="switchAdminTab('report', this)">📊 تقرير</button>
-  <button class="nav-tab" onclick="switchAdminTab('monthly', this)">🗓️ شهري</button>
+  <button class="nav-tab active" onclick="adTab('day',this)">📅 اليوم</button>
+  <button class="nav-tab" onclick="adTab('menu',this)">📋 قائمة</button>
+  <button class="nav-tab" onclick="adTab('expenses',this)">💸 مصاريف</button>
+  <button class="nav-tab" onclick="adTab('draws',this)" style="color:#c39bd3;">💜 سحوبات</button>
+  <button class="nav-tab" onclick="adTab('debts',this)" style="color:#e74c3c;">🔴 ذمم</button>
+  <button class="nav-tab" onclick="adTab('report',this)">📊 تقرير</button>
+  <button class="nav-tab" onclick="adTab('monthly',this)">🗓️ شهري</button>
+  <button class="nav-tab" onclick="adTab('analytics',this)">📈 تحليل</button>
+  <button class="nav-tab" onclick="adTab('settings',this)">⚙️ إعدادات</button>
+  <button class="nav-tab" onclick="adTab('qr',this)">📱 QR</button>
 </div>
 
-<!-- DAY TAB -->
+<!-- ── DAY TAB ─────────────────────────────────────── -->
 <div id="atab-day" class="page">
   {% if day %}
   <div class="alert alert-success">✅ اليوم مفتوح منذ {{ day['started_at'][11:16] }}</div>
   <div class="stat-row">
-    <div class="stat"><div class="stat-val">{{ orders|length }}</div><div class="stat-label">الطلبات</div></div>
-    <div class="stat"><div class="stat-val">{{ "%.0f"|format(total_sales) }} د.أ</div><div class="stat-label">المبيعات</div></div>
+    <div class="stat"><div class="stat-val">{{ orders|length }}</div><div class="stat-label">طلبات</div></div>
+    <div class="stat"><div class="stat-val" style="font-size:18px;">{{ "%.3f"|format(total_sales) }}</div><div class="stat-label">مبيعات (د.أ)</div></div>
   </div>
-  <form method="POST" action="/admin/day/close">
-    <button class="btn btn-red" type="submit" onclick="return confirm('هل تريد إغلاق اليوم؟')">🔒 إغلاق اليوم</button>
+  <div class="stat-row">
+    <div class="stat"><div class="stat-val" style="color:var(--green);font-size:16px;">{{ "%.3f"|format(pay_day.get('نقدي',0)) }}</div><div class="stat-label">💵 نقدي</div></div>
+    <div class="stat"><div class="stat-val" style="color:#3498db;font-size:16px;">{{ "%.3f"|format(pay_day.get('بطاقة',0) + pay_day.get('دفع إلكتروني',0)) }}</div><div class="stat-label">💳 إلكتروني</div></div>
+  </div>
+  <form method="POST" action="/admin/day/close" style="margin-bottom:12px;">
+    <button class="btn btn-red" type="submit" onclick="return confirm('إغلاق اليوم؟')">🔒 إغلاق اليوم</button>
   </form>
   {% else %}
-  <div class="alert alert-warn">⚠️ اليوم لم يبدأ بعد. اضغط لبدء اليوم.</div>
+  <div class="alert alert-warn">⚠️ اليوم لم يبدأ بعد</div>
   <form method="POST" action="/admin/day/start">
-    <button class="btn btn-primary" type="submit" style="font-size:18px;padding:16px;">🌅 بدء اليوم</button>
+    <button class="btn btn-primary" type="submit">🌅 بدء اليوم</button>
   </form>
   {% endif %}
 
   {% if prev_days %}
-  <div class="card" style="margin-top:20px;">
+  <div class="card" style="margin-top:16px;">
     <div class="card-title">أيام سابقة</div>
     {% for d in prev_days %}
-    <div class="list-item" style="padding:10px 0;">
+    <div class="list-item">
       <div>
-        <div style="font-size:13px;font-weight:700;">{{ d['started_at'][:10] }}</div>
-        <div style="font-size:11px;color:var(--text2);">{{ "%.2f"|format(d['sales'] or 0) }} د.أ</div>
+        <div style="font-weight:700;font-size:13px;">{{ d['started_at'][:10] }}</div>
+        <div style="font-size:12px;color:var(--accent2);">{{ "%.3f"|format(d['sales'] or 0) }} د.أ</div>
       </div>
-      <form method="POST" action="/admin/day/delete/{{ d['id'] }}" style="margin:0;">
-        <button type="submit" class="btn btn-red btn-sm" style="padding:4px 10px;min-height:30px;"
-          onclick="return confirm('حذف هذا اليوم وجميع طلباته نهائياً؟')">🗑️ حذف</button>
+      <form method="POST" action="/admin/day/delete/{{ d['id'] }}"
+            onsubmit="return confirm('حذف هذا اليوم نهائياً؟')">
+        <button type="submit" class="btn btn-red btn-sm">🗑️ حذف</button>
       </form>
     </div>
     {% endfor %}
@@ -1642,19 +1622,19 @@ ADMIN_HTML = """
   {% endif %}
 </div>
 
-<!-- MENU TAB -->
+<!-- ── MENU TAB ─────────────────────────────────────── -->
 <div id="atab-menu" class="page" style="display:none;">
   <div class="card">
-    <div class="card-title">➕ إضافة صنف جديد</div>
-    <form method="POST" action="/admin/menu/add">
+    <div class="card-title">➕ إضافة صنف</div>
+    <form method="POST" action="/admin/menu/add" enctype="multipart/form-data">
       <div class="form-group">
         <label class="label">اسم الصنف</label>
-        <input class="input" name="name" placeholder="مثال: قهوة تركية" required>
+        <input class="input" name="name" placeholder="مثال: كابتشينو" required>
       </div>
       <div class="form-row">
         <div class="form-group">
           <label class="label">السعر (د.أ)</label>
-          <input class="input" name="price" type="number" step="0.01" min="0" placeholder="0.00" required>
+          <input class="input" name="price" type="number" step="0.05" min="0" placeholder="0.000" required>
         </div>
         <div class="form-group">
           <label class="label">الفئة</label>
@@ -1668,33 +1648,33 @@ ADMIN_HTML = """
         <input class="input" name="description" placeholder="وصف المشروب...">
       </div>
       <div class="form-group">
-        <label class="label">رابط الصورة (اختياري)</label>
-        <textarea class="input" name="image_b64" placeholder="رابط الصورة أو مسار Base64..."></textarea>
+        <label class="label">📸 صورة (من الجوال أو الجهاز)</label>
+        <input class="input" name="image_file" type="file" accept="image/*"
+               capture="environment" style="padding:10px;font-size:14px;">
       </div>
       <button class="btn btn-primary" type="submit">+ إضافة</button>
     </form>
   </div>
 
-  {% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
-
   <div class="card">
-    <div class="card-title">الأصناف الحالية ({{ items|length }})</div>
-    {% if not items %}
-    <div style="text-align:center;color:var(--muted);padding:20px;">القائمة فارغة</div>
-    {% endif %}
+    <div class="card-title">الأصناف ({{ items|length }})</div>
     {% for cat_key, cat_label in categories.items() %}
       {% set cat_items = items | selectattr('category','equalto',cat_key) | list %}
       {% if cat_items %}
       <div class="cat-title">{{ cat_label }}</div>
       {% for item in cat_items %}
-      <div class="list-item">
-        <div>
+      <div class="list-item" style="flex-wrap:wrap;gap:8px;">
+        <div style="flex:1;min-width:0;">
           <div style="font-weight:700;">{{ item['name'] }}</div>
-          <div style="font-size:13px;color:var(--accent2);">{{ "%.2f"|format(item['price']) }} د.أ</div>
+          <div style="font-size:13px;color:var(--accent2);">{{ "%.3f"|format(item['price']) }} د.أ</div>
+          {% if item.get('description') %}<div style="font-size:11px;color:var(--text2);">{{ item['description'][:50] }}</div>{% endif %}
         </div>
-        <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
-          <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
-        </form>
+        <div style="display:flex;gap:6px;flex-shrink:0;">
+          <button class="btn btn-outline btn-sm" onclick="editPrice({{ item['id'] }},{{ item['price'] }})">✏️</button>
+          <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
+            <button class="btn btn-red btn-sm" onclick="return confirm('حذف؟')">🗑️</button>
+          </form>
+        </div>
       </div>
       {% endfor %}
       {% endif %}
@@ -1702,7 +1682,7 @@ ADMIN_HTML = """
   </div>
 </div>
 
-<!-- EXPENSES TAB -->
+<!-- ── EXPENSES TAB ─────────────────────────────────── -->
 <div id="atab-expenses" class="page" style="display:none;">
   <div class="card">
     <div class="card-title">➕ تسجيل مصروف</div>
@@ -1710,139 +1690,311 @@ ADMIN_HTML = """
       <div class="form-row">
         <div class="form-group">
           <label class="label">المبلغ (د.أ)</label>
-          <input class="input" name="amount" type="number" step="0.5" min="0" placeholder="0.00" required>
+          <input class="input" name="amount" type="number" step="0.05" min="0" placeholder="0.000" required>
         </div>
         <div class="form-group">
           <label class="label">السبب</label>
-          <input class="input" name="reason" placeholder="مثال: حبوب قهوة" required>
+          <input class="input" name="reason" placeholder="مثال: قهوة" required>
         </div>
       </div>
       <button class="btn btn-primary" type="submit">+ تسجيل</button>
     </form>
   </div>
-
   <div class="card">
-    <div class="card-title">المصاريف ({{ expenses|length }})</div>
+    <div class="card-title">المصاريف اليوم ({{ expenses|length }})</div>
     {% for ex in expenses %}
     <div class="list-item">
-      <div>
-        <div style="font-weight:700;">{{ ex['reason'] }}</div>
-        <div style="font-size:11px;color:var(--text2);">{{ ex['employee'] }} · {{ ex['created_at'][11:16] }}</div>
-      </div>
-      <div style="color:var(--red);font-weight:700;">−{{ "%.2f"|format(ex['amount']) }} د.أ</div>
+      <div><div style="font-weight:700;">{{ ex['reason'] }}</div><div style="font-size:11px;color:var(--text2);">{{ ex['employee'] }} · {{ ex['created_at'][11:16] }}</div></div>
+      <div style="color:var(--red);font-weight:700;">−{{ "%.3f"|format(ex['amount']) }} د.أ</div>
     </div>
     {% endfor %}
-    {% if not expenses %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد مصاريف</div>{% endif %}
+    {% if not expenses %}<div style="text-align:center;color:var(--muted);padding:14px;">لا توجد مصاريف</div>{% endif %}
   </div>
 </div>
 
-<!-- DRAWS TAB (Admin view) -->
+<!-- ── DRAWS TAB ─────────────────────────────────────── -->
 <div id="atab-draws" class="page" style="display:none;">
   <div class="stat-row">
-    <div class="stat">
-      <div class="stat-val" style="color:#c39bd3;">{{ draws|length }}</div>
-      <div class="stat-label">عدد السحوبات</div>
-    </div>
-    <div class="stat">
-      <div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div>
-      <div class="stat-label">إجمالي السحوبات (د.أ)</div>
-    </div>
-  </div>
-  <div class="card" style="border-color:rgba(142,68,173,0.3);">
-    <div class="card-title" style="color:#c39bd3;">💜 سحوبات اليوم</div>
-    {% for dr in draws %}
-    <div class="list-item">
-      <div>
-        <div style="font-weight:700;">{{ dr['employee'] }}</div>
-        <div style="font-size:11px;color:var(--text2);">{{ dr['note'] or '—' }} · {{ dr['created_at'][11:16] }}</div>
-      </div>
-      <div style="color:#c39bd3;font-weight:700;">−{{ "%.2f"|format(dr['amount']) }} د.أ</div>
-    </div>
-    {% endfor %}
-    {% if not draws %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد سحوبات اليوم</div>{% endif %}
-  </div>
-</div>
-
-<!-- QR TAB -->
-<div id="atab-qr" class="page" style="display:none;text-align:center;">
-  <div class="card" style="text-align:center;">
-    <div class="card-title">📱 QR Code للزبائن</div>
-    <p style="color:var(--text2);font-size:13px;margin-bottom:16px;">اطبع هذا وضعه على الطاولات. الزبون يمسحه ويطلب مباشرة.</p>
-    <img src="/admin/qr/image" alt="QR Code" style="width:220px;height:220px;border-radius:12px;">
-    <div style="margin-top:14px;font-size:12px;color:var(--muted);">{{ customer_url }}</div>
-    <a href="{{ customer_url }}" target="_blank" class="btn btn-outline btn-sm" style="margin-top:12px;width:auto;display:inline-flex;">🔗 افتح صفحة الزبون</a>
-  </div>
-</div>
-
-<!-- REPORT TAB -->
-<div id="atab-report" class="page" style="display:none;">
-  <div class="stat-row">
-    <div class="stat"><div class="stat-val" style="color:var(--accent2);">{{ "%.2f"|format(total_sales) }}</div><div class="stat-label">المبيعات (د.أ)</div></div>
-    <div class="stat"><div class="stat-val" style="color:var(--red);">{{ "%.2f"|format(total_expenses) }}</div><div class="stat-label">المصاريف (د.أ)</div></div>
-  </div>
-  <div class="stat-row">
-    <div class="stat"><div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div><div class="stat-label">السحوبات (د.أ)</div></div>
-    <div class="stat"><div class="stat-val" style="color:{% if net >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(net) }}</div><div class="stat-label">صافي الربح (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:#c39bd3;">{{ draws|length }}</div><div class="stat-label">السحوبات</div></div>
+    <div class="stat"><div class="stat-val" style="color:#c39bd3;font-size:18px;">{{ "%.3f"|format(total_draws) }}</div><div class="stat-label">الإجمالي (د.أ)</div></div>
   </div>
   <div class="card">
-    <div class="card-title">الطلبات المكتملة</div>
-    {% for o in orders %}
+    {% for dr in draws %}
+    <div class="list-item">
+      <div><div style="font-weight:700;">{{ dr['employee'] }}</div><div style="font-size:11px;color:var(--text2);">{{ dr['note'] or '—' }} · {{ dr['created_at'][11:16] }}</div></div>
+      <div style="color:#c39bd3;font-weight:700;">−{{ "%.3f"|format(dr['amount']) }} د.أ</div>
+    </div>
+    {% endfor %}
+    {% if not draws %}<div style="text-align:center;color:var(--muted);padding:14px;">لا توجد سحوبات</div>{% endif %}
+  </div>
+</div>
+
+<!-- ── DEBTS TAB ─────────────────────────────────────── -->
+<div id="atab-debts" class="page" style="display:none;">
+  <div class="stat-row">
+    <div class="stat"><div class="stat-val" style="color:var(--red);">{{ "%.3f"|format(debt_total_owed) }}</div><div class="stat-label">📥 مديونية (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--green);">{{ "%.3f"|format(debt_total_paid) }}</div><div class="stat-label">📤 مدفوع (د.أ)</div></div>
+  </div>
+  <div class="card" style="border-color:rgba(231,76,60,0.3);">
+    <div class="card-title" style="color:var(--red);">➕ تسجيل ذمة</div>
+    <form method="POST" action="/admin/debts/add">
+      <div class="form-group">
+        <label class="label">اسم الزبون</label>
+        <input class="input" name="customer" placeholder="اسم الزبون" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="label">المبلغ (د.أ)</label>
+          <input class="input" name="amount" type="number" step="0.05" min="0" placeholder="0.000" required>
+        </div>
+        <div class="form-group">
+          <label class="label">النوع</label>
+          <select class="select" name="direction">
+            <option value="owed">مديون للمقهى</option>
+            <option value="paid">دفع دين سابق</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="label">السبب (اختياري)</label>
+        <input class="input" name="reason" placeholder="مثال: قهوة بالآجل">
+      </div>
+      <button class="btn btn-red" type="submit">+ تسجيل</button>
+    </form>
+  </div>
+  <div class="card">
+    <div class="card-title">سجل الذمم</div>
+    {% for d in all_debts %}
     <div class="list-item">
       <div>
-        <div style="font-weight:700;font-family:monospace;color:var(--accent2);">#{{ o['id'] }}</div>
-        <div style="font-size:11px;color:var(--text2);">{{ o['payment'] }} · {{ o['employee'] }} · {{ o['created_at'][11:16] }}</div>
+        <div style="font-weight:700;">{{ d['customer'] }}</div>
+        <div style="font-size:11px;color:var(--text2);">{{ d['reason'] or '—' }} · {{ d['created_at'][:10] }}</div>
       </div>
-      <div style="display:flex; align-items:center; gap:8px;">
-        <div style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(o['total']) }} د.أ</div>
-        <form method="POST" action="/admin/orders/delete/{{ o['id'] }}" style="margin:0;">
-          <button type="submit" class="btn btn-red btn-sm" style="padding:4px 8px; min-height: 28px;" onclick="return confirm('حذف الطلب نهائياً؟')">🗑️</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:700;color:{% if d['direction']=='owed' %}var(--red){% else %}var(--green){% endif %};">
+          {% if d['direction']=='owed' %}−{% else %}+{% endif %}{{ "%.3f"|format(d['amount']) }} د.أ
+        </span>
+        <form method="POST" action="/admin/debts/delete/{{ d['id'] }}" style="margin:0;">
+          <button type="submit" class="btn btn-red btn-sm" onclick="return confirm('حذف؟')">🗑️</button>
         </form>
       </div>
     </div>
     {% endfor %}
-    {% if not orders %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد طلبات</div>{% endif %}
+    {% if not all_debts %}<div style="text-align:center;color:var(--muted);padding:14px;">لا توجد ذمم مسجلة</div>{% endif %}
   </div>
 </div>
 
-<!-- MONTHLY TAB -->
-<div id="atab-monthly" class="page" style="display:none;">
+<!-- ── REPORT TAB ────────────────────────────────────── -->
+<div id="atab-report" class="page" style="display:none;">
+  <div class="stat-row">
+    <div class="stat"><div class="stat-val" style="color:var(--accent2);font-size:18px;">{{ "%.3f"|format(total_sales) }}</div><div class="stat-label">المبيعات (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--red);font-size:18px;">{{ "%.3f"|format(total_expenses) }}</div><div class="stat-label">المصاريف (د.أ)</div></div>
+  </div>
+  <div class="stat-row">
+    <div class="stat"><div class="stat-val" style="color:#c39bd3;font-size:18px;">{{ "%.3f"|format(total_draws) }}</div><div class="stat-label">السحوبات (د.أ)</div></div>
+    <div class="stat"><div class="stat-val" style="color:{% if net >= 0 %}var(--green){% else %}var(--red){% endif %};font-size:18px;">{{ "%.3f"|format(net) }}</div><div class="stat-label">الصافي (د.أ)</div></div>
+  </div>
+  <!-- Payment breakdown -->
+  <div class="card" style="border-color:rgba(52,152,219,0.3);">
+    <div class="card-title" style="color:#3498db;">💳 توزيع طرق الدفع اليوم</div>
+    <div class="list-item">
+      <span>💵 نقدي</span>
+      <span style="font-weight:700;color:var(--green);">{{ "%.3f"|format(pay_day.get('نقدي',0)) }} د.أ</span>
+    </div>
+    <div class="list-item">
+      <span>💳 بطاقة</span>
+      <span style="font-weight:700;color:#3498db;">{{ "%.3f"|format(pay_day.get('بطاقة',0)) }} د.أ</span>
+    </div>
+    <div class="list-item">
+      <span>📱 إلكتروني</span>
+      <span style="font-weight:700;color:#9b59b6;">{{ "%.3f"|format(pay_day.get('دفع إلكتروني',0)) }} د.أ</span>
+    </div>
+  </div>
+  <!-- Orders list -->
   <div class="card">
-    <div class="card-title">التقرير الشهري المفصل</div>
-    {% for m in monthly_list %}
-    <div class="list-item" style="flex-direction:column;align-items:flex-start;gap:6px;border-color:var(--border);background:var(--surface2);padding:12px;border-radius:10px;margin-bottom:10px;">
-      <div style="font-weight:900;font-size:16px;color:var(--text);margin-bottom:4px;border-bottom:1px solid var(--border);width:100%;padding-bottom:4px;">شهر: {{ m['month'] }}</div>
-      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
-        <span style="color:var(--text2);">المبيعات:</span>
-        <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(m['sales']) }} د.أ</span>
+    <div class="card-title">الطلبات ({{ orders|length }})</div>
+    {% for o in orders %}
+    <div class="list-item" style="flex-wrap:wrap;gap:6px;">
+      <div style="flex:1;">
+        <div style="font-weight:700;font-family:monospace;color:var(--accent2);">#{{ o['id'] }}</div>
+        <div style="font-size:11px;color:var(--text2);">{{ o['payment'] }} · {{ o['employee'] }} · {{ o['created_at'][11:16] }}{% if o.get('table_num') %} · 🪑{{ o['table_num'] }}{% endif %}</div>
+        {% if o.get('note') %}<div style="font-size:11px;color:var(--text2);">📝 {{ o['note'] }}</div>{% endif %}
       </div>
-      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
-        <span style="color:var(--text2);">المصاريف:</span>
-        <span style="font-weight:700;color:var(--red);">{{ "%.2f"|format(m['exp']) }} د.أ</span>
-      </div>
-      <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
-        <span style="color:var(--text2);">السحوبات:</span>
-        <span style="font-weight:700;color:#c39bd3;">{{ "%.2f"|format(m['draws']) }} د.أ</span>
-      </div>
-      <div style="display:flex;justify-content:space-between;width:100%;font-size:14px;margin-top:4px;border-top:1px dashed rgba(255,255,255,0.1);padding-top:6px;">
-        <span style="font-weight:700;color:var(--text);">الصافي:</span>
-        <span style="font-weight:900;color:{% if m['net'] >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(m['net']) }} د.أ</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-weight:700;color:var(--accent2);">{{ "%.3f"|format(o['total']) }} د.أ</span>
+        <form method="POST" action="/admin/orders/delete/{{ o['id'] }}" style="margin:0;">
+          <button type="submit" class="btn btn-red btn-sm" onclick="return confirm('حذف الطلب؟')">🗑️</button>
+        </form>
       </div>
     </div>
     {% endfor %}
-    {% if not monthly_list %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد بيانات</div>{% endif %}
+    {% if not orders %}<div style="text-align:center;color:var(--muted);padding:14px;">لا توجد طلبات</div>{% endif %}
+  </div>
+</div>
+
+<!-- ── MONTHLY TAB ────────────────────────────────────── -->
+<div id="atab-monthly" class="page" style="display:none;">
+  <!-- Payment breakdown this month -->
+  <div class="card" style="border-color:rgba(52,152,219,0.3);">
+    <div class="card-title" style="color:#3498db;">💳 توزيع الدفع هذا الشهر</div>
+    <div class="list-item"><span>💵 نقدي</span><span style="font-weight:700;color:var(--green);">{{ "%.3f"|format(pay_month.get('نقدي',0)) }} د.أ</span></div>
+    <div class="list-item"><span>💳 بطاقة</span><span style="font-weight:700;color:#3498db;">{{ "%.3f"|format(pay_month.get('بطاقة',0)) }} د.أ</span></div>
+    <div class="list-item"><span>📱 إلكتروني</span><span style="font-weight:700;color:#9b59b6;">{{ "%.3f"|format(pay_month.get('دفع إلكتروني',0)) }} د.أ</span></div>
+  </div>
+  <!-- Monthly breakdown -->
+  <div class="card">
+    <div class="card-title">التقرير الشهري</div>
+    {% for m in monthly_list %}
+    <div style="background:var(--surface2);border-radius:10px;padding:12px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-weight:900;font-size:15px;">{{ m['month'] }}</div>
+        <form method="POST" action="/admin/month/delete" style="margin:0;"
+              onsubmit="return confirm('حذف كل بيانات {{ m['month'] }} نهائياً؟')">
+          <input type="hidden" name="month" value="{{ m['month'] }}">
+          <button type="submit" class="btn btn-red btn-sm">🗑️ حذف</button>
+        </form>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;">
+        <div>مبيعات: <strong style="color:var(--accent2);">{{ "%.3f"|format(m['sales']) }}</strong></div>
+        <div>مصاريف: <strong style="color:var(--red);">{{ "%.3f"|format(m['exp']) }}</strong></div>
+        <div>سحوبات: <strong style="color:#c39bd3;">{{ "%.3f"|format(m['draws']) }}</strong></div>
+        <div>صافي: <strong style="color:{% if m['net']>=0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.3f"|format(m['net']) }}</strong></div>
+      </div>
+    </div>
+    {% endfor %}
+    {% if not monthly_list %}<div style="text-align:center;color:var(--muted);padding:14px;">لا توجد بيانات</div>{% endif %}
+  </div>
+</div>
+
+<!-- ── ANALYTICS TAB ─────────────────────────────────── -->
+<div id="atab-analytics" class="page" style="display:none;">
+  {% if top_day %}
+  <div class="card" style="border-color:rgba(245,184,53,0.3);">
+    <div class="card-title" style="color:var(--accent2);">🏆 الأكثر مبيعاً اليوم</div>
+    {% for item in top_day %}
+    <div class="list-item">
+      <span style="font-size:18px;font-weight:900;color:var(--accent2);min-width:28px;">{{ loop.index }}</span>
+      <div style="flex:1;"><div style="font-weight:700;">{{ item['item_name'] }}</div><div style="font-size:11px;color:var(--text2);">{{ item['order_count'] }} طلب</div></div>
+      <div style="text-align:left;"><div style="font-weight:700;color:var(--accent2);">{{ item['total_qty'] }} قطعة</div><div style="font-size:11px;color:var(--text2);">{{ "%.3f"|format(item['total_rev']) }} د.أ</div></div>
+    </div>
+    {% endfor %}
+    <!-- Least selling -->
+    {% if top_day|length > 1 %}
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">🔻 الأقل مبيعاً اليوم</div>
+      {% set last = top_day[-1] %}
+      <div class="list-item">
+        <div style="flex:1;"><div style="font-weight:700;">{{ last['item_name'] }}</div></div>
+        <div style="font-weight:700;color:var(--muted);">{{ last['total_qty'] }} قطعة</div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card"><div style="text-align:center;color:var(--muted);padding:20px;">لا توجد مبيعات اليوم</div></div>
+  {% endif %}
+
+  {% if top_month %}
+  <div class="card" style="border-color:rgba(93,173,226,0.3);">
+    <div class="card-title" style="color:#5dade2;">🏆 الأكثر مبيعاً هذا الشهر</div>
+    {% for item in top_month %}
+    <div class="list-item">
+      <span style="font-size:18px;font-weight:900;color:#5dade2;min-width:28px;">{{ loop.index }}</span>
+      <div style="flex:1;"><div style="font-weight:700;">{{ item['item_name'] }}</div><div style="font-size:11px;color:var(--text2);">{{ item['order_count'] }} طلب</div></div>
+      <div style="text-align:left;"><div style="font-weight:700;color:#5dade2;">{{ item['total_qty'] }} قطعة</div><div style="font-size:11px;color:var(--text2);">{{ "%.3f"|format(item['total_rev']) }} د.أ</div></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- ── SETTINGS TAB ──────────────────────────────────── -->
+<div id="atab-settings" class="page" style="display:none;">
+  <div class="card" style="border-color:rgba(212,136,10,0.3);">
+    <div class="card-title">⚙️ إعدادات الأسعار والمعلومات</div>
+    <div class="form-group">
+      <label class="label">📞 رقم الهاتف (يظهر للجميع)</label>
+      <input class="input" id="st_phone" type="tel" value="{{ settings.phone }}" placeholder="مثال: 0799123456">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="label">💧 سعر الماء (د.أ)</label>
+        <input class="input" id="st_water_price" type="number" step="0.05" value="{{ settings.water_price }}" placeholder="0.250">
+      </div>
+      <div class="form-group" style="display:none;"><div class="label">.</div></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="label">💨 سعر الأرجيلة (د.أ)</label>
+        <input class="input" id="st_shisha_price" type="number" step="0.25" value="{{ settings.shisha_price }}" placeholder="5.000">
+      </div>
+      <div class="form-group">
+        <label class="label">اسم الأرجيلة</label>
+        <input class="input" id="st_shisha_label" value="{{ settings.shisha_label }}" placeholder="أرجيلة">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="label">🚗 سعر الغسيل (د.أ)</label>
+        <input class="input" id="st_carwash_price" type="number" step="0.25" value="{{ settings.carwash_price }}" placeholder="3.000">
+      </div>
+      <div class="form-group">
+        <label class="label">اسم خدمة الغسيل</label>
+        <input class="input" id="st_carwash_label" value="{{ settings.carwash_label }}" placeholder="غسيل سيارة">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveSettings()">💾 حفظ الإعدادات</button>
+    <div id="settingsMsg" class="alert alert-success" style="display:none;margin-top:10px;">✅ تم الحفظ</div>
+  </div>
+</div>
+
+<!-- ── QR TAB ────────────────────────────────────────── -->
+<div id="atab-qr" class="page" style="display:none;text-align:center;">
+  <div class="card">
+    <div class="card-title">📱 QR Code للزبائن</div>
+    <img src="/admin/qr/image" alt="QR" style="width:220px;height:220px;border-radius:12px;">
+    <div style="margin-top:12px;font-size:12px;color:var(--muted);">{{ customer_url }}</div>
+    <a href="{{ customer_url }}" target="_blank" class="btn btn-outline btn-sm" style="margin-top:10px;width:auto;display:inline-flex;">🔗 افتح</a>
   </div>
 </div>
 
 <script>
-function switchAdminTab(name, btn) {
+function adTab(name, btn) {
   document.querySelectorAll('[id^="atab-"]').forEach(el => el.style.display = 'none');
   document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
   document.getElementById('atab-' + name).style.display = 'block';
   btn.classList.add('active');
 }
+function editPrice(id, cur) {
+  const p = parseFloat(prompt('السعر الجديد (د.أ):', cur));
+  if (!p || p <= 0) return;
+  fetch('/admin/menu/price/' + id, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({price: p})
+  }).then(r=>r.json()).then(d=>{ if(d.ok) location.reload(); else alert(d.error||'خطأ'); });
+}
+function saveSettings() {
+  const data = {
+    phone:          document.getElementById('st_phone').value,
+    water_price:    document.getElementById('st_water_price').value,
+    shisha_price:   document.getElementById('st_shisha_price').value,
+    shisha_label:   document.getElementById('st_shisha_label').value,
+    carwash_price:  document.getElementById('st_carwash_price').value,
+    carwash_label:  document.getElementById('st_carwash_label').value,
+  };
+  fetch('/admin/settings/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      const m=document.getElementById('settingsMsg');
+      m.style.display='block';
+      setTimeout(()=>{m.style.display='none';location.reload();},1500);
+    }
+  });
+}
 </script>
 """
-
 @app.route("/admin")
 @login_required
 @admin_required
@@ -1875,7 +2027,11 @@ def admin():
     prev_days = [dict(r) for r in prev_raw]
 
     monthly_stats = {}
-    all_orders = qry(conn, "SELECT created_at, total FROM orders WHERE status='closed'").fetchall()
+    all_orders = qry(conn, """
+        SELECT o.created_at, o.total
+        FROM orders o JOIN days d ON d.id=o.day_id
+        WHERE d.status='closed'
+    """).fetchall()
     all_exp    = qry(conn, "SELECT created_at, amount FROM expenses").fetchall()
     all_draws  = qry(conn, "SELECT created_at, amount FROM draws").fetchall()
     
@@ -1901,15 +2057,37 @@ def admin():
 
     conn.close()
 
+    # Debts
+    conn2 = get_db()
+    all_debts = [dict(d) for d in qry(conn2, "SELECT * FROM debts ORDER BY created_at DESC").fetchall()]
+    conn2.close()
+    debt_total_owed = sum(d["amount"] for d in all_debts if d["direction"]=="owed")
+    debt_total_paid = sum(d["amount"] for d in all_debts if d["direction"]=="paid")
+
+    # Top / bottom items
+    top_day   = get_top_items(day_id=day["id"]) if day else []
+    cur_month = now_str()[:7]
+    top_month = get_top_items(month=cur_month)
+
+    # Payment breakdown
+    pay_day   = get_payment_breakdown(day_id=day["id"]) if day else {}
+    pay_month = get_payment_breakdown(month=cur_month)
+
     host         = request.host_url.rstrip("/")
     customer_url = f"{host}/customer"
     msg          = request.args.get("msg", "")
+    settings     = get_settings()
     return render(ADMIN_HTML,
         day=day, items=items, orders=orders, expenses=expenses, draws=draws,
         total_sales=total_sales, total_expenses=total_expenses,
         total_draws=total_draws,
         net=total_sales - total_expenses - total_draws,
-        prev_days=prev_days, monthly_list=monthly_list, customer_url=customer_url,
+        prev_days=prev_days, monthly_list=monthly_list,
+        customer_url=customer_url,
+        all_debts=all_debts, debt_total_owed=debt_total_owed, debt_total_paid=debt_total_paid,
+        top_day=top_day, top_month=top_month,
+        pay_day=pay_day, pay_month=pay_month,
+        settings=settings,
         user_name=session["user_name"], msg=msg)
 
 @app.route("/admin/orders/delete/<int:oid>", methods=["POST"])
@@ -1922,6 +2100,24 @@ def order_delete(oid):
     conn.commit()
     conn.close()
     return redirect("/admin?msg=تم حذف الطلب بنجاح#atab-report")
+
+
+@app.route("/admin/day/delete/<int:did>", methods=["POST"])
+@login_required
+@admin_required
+def day_delete(did):
+    conn = get_db()
+    # Get all order IDs for this day
+    order_ids = [r["id"] for r in qry(conn, "SELECT id FROM orders WHERE day_id=%s", (did,)).fetchall()]
+    for oid in order_ids:
+        exe(conn, "DELETE FROM order_items WHERE order_id=%s", (oid,))
+    exe(conn, "DELETE FROM orders WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM expenses WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM draws WHERE day_id=%s", (did,))
+    exe(conn, "DELETE FROM days WHERE id=%s", (did,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=✅ تم حذف اليوم")
 
 @app.route("/admin/day/start", methods=["POST"])
 @login_required
@@ -1949,17 +2145,39 @@ def day_close():
 @login_required
 @admin_required
 def menu_add():
+    import base64 as _b64
     name        = request.form.get("name", "").strip()
-    price       = float(request.form.get("price", 0))
+    price       = float(request.form.get("price", 0) or 0)
     category    = request.form.get("category", "hot_coffee")
     description = request.form.get("description", "").strip()
-    image_b64   = request.form.get("image_b64", "").strip()
+    image_b64   = ""
+    img_file    = request.files.get("image_file")
+    if img_file and img_file.filename:
+        raw       = img_file.read()
+        mime      = img_file.content_type or "image/jpeg"
+        image_b64 = f"data:{mime};base64," + _b64.b64encode(raw).decode()
     if name and price > 0:
         conn = get_db()
-        exe(conn, "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)", (name, price, category, description, image_b64))
+        exe(conn,
+            "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)",
+            (name, price, category, description, image_b64))
         conn.commit()
         conn.close()
-    return redirect("/admin?msg=تم إضافة الصنف#atab-menu")
+    return redirect("/admin?msg=✅ تم إضافة الصنف#atab-menu")
+
+@app.route("/admin/menu/price/<int:item_id>", methods=["POST"])
+@login_required
+@admin_required
+def menu_price(item_id):
+    data  = request.json or {}
+    price = float(data.get("price", 0))
+    if price <= 0:
+        return jsonify({"ok": False, "error": "سعر غير صحيح"})
+    conn = get_db()
+    exe(conn, "UPDATE menu_items SET price=%s WHERE id=%s", (price, item_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 @app.route("/admin/menu/delete/<int:item_id>", methods=["POST"])
 @login_required
@@ -2001,6 +2219,72 @@ def qr_image():
     resp = make_response(buf.read())
     resp.headers["Content-Type"] = "image/png"
     return resp
+
+# ─── SETTINGS ────────────────────────────────────────────────────
+@app.route("/admin/settings/save", methods=["POST"])
+@login_required
+@admin_required
+def settings_save():
+    data = request.json or {}
+    allowed = {"water_price","shisha_price","shisha_label","carwash_price","carwash_label","phone"}
+    for k, v in data.items():
+        if k in allowed:
+            save_setting(k, str(v))
+    return jsonify({"ok": True})
+
+# ─── DEBTS ───────────────────────────────────────────────────────
+@app.route("/admin/debts/add", methods=["POST"])
+@login_required
+@admin_required
+def debt_add():
+    customer  = request.form.get("customer","").strip()
+    amount    = float(request.form.get("amount", 0) or 0)
+    reason    = request.form.get("reason","").strip()
+    direction = request.form.get("direction","owed")
+    if customer and amount > 0:
+        conn = get_db()
+        exe(conn,
+            "INSERT INTO debts (customer,amount,reason,direction,employee,created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (customer, amount, reason, direction, session["user_name"], now_str()))
+        conn.commit()
+        conn.close()
+    return redirect("/admin?tab=debts#atab-debts")
+
+@app.route("/admin/debts/delete/<int:did>", methods=["POST"])
+@login_required
+@admin_required
+def debt_delete(did):
+    conn = get_db()
+    exe(conn, "DELETE FROM debts WHERE id=%s", (did,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?tab=debts#atab-debts")
+
+# ─── MONTHLY DELETE ───────────────────────────────────────────────
+@app.route("/admin/month/delete", methods=["POST"])
+@login_required
+@admin_required
+def month_delete():
+    month = request.form.get("month","")  # format: 2025-04
+    if not month or len(month) != 7:
+        return redirect("/admin#atab-monthly")
+    conn = get_db()
+    # Find all days in that month
+    day_rows = qry(conn, "SELECT id FROM days WHERE started_at LIKE %s", (month+"%",)).fetchall()
+    for dr in day_rows:
+        did = dr["id"]
+        oids = [r["id"] for r in qry(conn,"SELECT id FROM orders WHERE day_id=%s",(did,)).fetchall()]
+        for oid in oids:
+            exe(conn,"DELETE FROM order_items WHERE order_id=%s",(oid,))
+        exe(conn,"DELETE FROM orders WHERE day_id=%s",(did,))
+        exe(conn,"DELETE FROM expenses WHERE day_id=%s",(did,))
+        exe(conn,"DELETE FROM draws WHERE day_id=%s",(did,))
+    exe(conn,"DELETE FROM days WHERE started_at LIKE %s",(month+"%",))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=✅ تم حذف بيانات الشهر " + month + "#atab-monthly")
+
+# ─── POS SUBMIT (staff) — include table_num ───────────────────────
 
 # ─── INIT ON STARTUP (gunicorn + python both) ────────────────────
 try:
