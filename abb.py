@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import sqlite3
 import qrcode
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, make_response
@@ -159,6 +160,19 @@ def init_db():
             note       TEXT,
             created_at TEXT
         )""",
+        f"""CREATE TABLE IF NOT EXISTS debts (
+            id            {id_col},
+            customer_name TEXT,
+            amount        {num},
+            note          TEXT,
+            status        TEXT DEFAULT 'pending',
+            employee      TEXT,
+            created_at    TEXT
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )""",
     ]
 
     for stmt in ddl:
@@ -172,6 +186,15 @@ def init_db():
         c.execute("ALTER TABLE menu_items ADD COLUMN image_b64 TEXT DEFAULT ''")
     except:
         pass
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN table_num TEXT DEFAULT ''")
+    except:
+        pass
+
+    # Default settings
+    c.execute("SELECT COUNT(*) AS cnt FROM settings")
+    if c.fetchone()["cnt"] == 0:
+        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s)", ("phone", "0790000000"))
 
     c.execute("SELECT COUNT(*) AS cnt FROM users")
     if c.fetchone()["cnt"] == 0:
@@ -663,6 +686,7 @@ function submitOrder() {
   if (!cart.length) return;
   const pay = document.getElementById('payMethod');
   const note = document.getElementById('orderNote');
+  const tbl = document.getElementById('tableNum');
   fetch('/pos/submit', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -670,6 +694,7 @@ function submitOrder() {
       items: cart,
       payment: pay ? pay.value : 'نقدي',
       note: note ? note.value : '',
+      table_num: tbl ? tbl.value : '',
       delivery: document.getElementById('uniDelivery') ? document.getElementById('uniDelivery').checked : false,
       source: 'staff'
     })
@@ -770,6 +795,7 @@ CATEGORIES = {
     "cold_drinks": "🍹 مشروبات باردة",
     "snacks": "🍽️ وجبات خفيفة",
     "argilee": "💨 الأراجيل",
+    "car_wash": "🚗 غسيل سيارات",
 }
 
 CATEGORY_IMG = {
@@ -779,6 +805,7 @@ CATEGORY_IMG = {
     "cold_drinks": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop",
     "snacks":      "https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=500&auto=format&fit=crop",
     "argilee":     "https://images.unsplash.com/photo-1559181567-c3190bded457?w=500&auto=format&fit=crop",
+    "car_wash":    "https://images.unsplash.com/photo-1520340356584-f9917d1eea6f?w=500&auto=format&fit=crop",
 }
 
 CATEGORY_GRADIENT = {
@@ -788,6 +815,7 @@ CATEGORY_GRADIENT = {
     "cold_drinks": "linear-gradient(135deg,#0e6b3e,#2ecc71)",
     "snacks":      "linear-gradient(135deg,#4a2a0e,#c0392b)",
     "argilee":     "linear-gradient(135deg,#1a0e2e,#6c3483)",
+    "car_wash":    "linear-gradient(135deg,#1a3a5c,#2980b9)",
 }
 
 # ─── HELPERS ─────────────────────────────────────────────────────
@@ -959,6 +987,10 @@ POS_HTML = """
 
   <div class="card">
     <div class="form-group">
+      <label class="label">رقم الطاولة (اختياري)</label>
+      <input class="input" id="tableNum" type="number" min="1" placeholder="مثال: 5">
+    </div>
+    <div class="form-group">
       <label class="label">طريقة الدفع</label>
       <select class="select" id="payMethod">
         <option>نقدي</option>
@@ -999,6 +1031,7 @@ POS_HTML = """
         <div>
           <span style="font-family:monospace;color:var(--accent2);font-weight:700;">#{{ o['id'] }}</span>
           <span style="font-size:11px;color:var(--text2);margin-right:8px;">{{ o['created_at'][-8:-3] }}</span>
+          {% if o.get('table_num') %}<span class="badge" style="font-size:10px;background:var(--accent);color:#000;">🍽 طاولة {{ o['table_num'] }}</span>{% endif %}
           {% if 'customer' in o['source'] %}<span class="badge" style="font-size:10px;background:var(--blue);color:#fff;">زبون</span>{% endif %}
           {% if 'uni' in o['source'] %}<span class="badge" style="font-size:10px;background:#8e44ad;color:#fff;">🎓 جامعة</span>{% endif %}
         </div>
@@ -1110,13 +1143,14 @@ def pos_submit():
     total = sum(i["price"] * i["qty"] for i in items)
     delivery = data.get("delivery", False)
     source = "staff_uni" if delivery else data.get("source", "staff")
+    table_num = data.get("table_num", "")
     conn  = get_db()
     oid = exe_returning(conn,
-        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, created_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        "INSERT INTO orders (day_id, total, payment, status, source, employee, note, table_num, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (day["id"], total, data.get("payment","نقدي"), "pending",
          source, session.get("user_name",""),
-         data.get("note",""), now_str()))
+         data.get("note",""), table_num, now_str()))
     for it in items:
         exe(conn,
             "INSERT INTO order_items (order_id, item_name, price, qty, note) VALUES (%s,%s,%s,%s,%s)",
@@ -1602,6 +1636,8 @@ ADMIN_HTML = """
   <button class="nav-tab" onclick="switchAdminTab('draws', this)" style="color:#c39bd3;">💜 سحوبات</button>
   <button class="nav-tab" onclick="switchAdminTab('qr', this)">📱 QR</button>
   <button class="nav-tab" onclick="switchAdminTab('report', this)">📊 تقرير</button>
+  <button class="nav-tab" onclick="switchAdminTab('analytics', this)">📈 تحليلات</button>
+  <button class="nav-tab" onclick="switchAdminTab('debts', this)">📒 ديون</button>
   <button class="nav-tab" onclick="switchAdminTab('monthly', this)">🗓️ شهري</button>
 </div>
 
@@ -1646,7 +1682,7 @@ ADMIN_HTML = """
 <div id="atab-menu" class="page" style="display:none;">
   <div class="card">
     <div class="card-title">➕ إضافة صنف جديد</div>
-    <form method="POST" action="/admin/menu/add">
+    <form method="POST" action="/admin/menu/add" enctype="multipart/form-data">
       <div class="form-group">
         <label class="label">اسم الصنف</label>
         <input class="input" name="name" placeholder="مثال: قهوة تركية" required>
@@ -1668,8 +1704,10 @@ ADMIN_HTML = """
         <input class="input" name="description" placeholder="وصف المشروب...">
       </div>
       <div class="form-group">
-        <label class="label">رابط الصورة (اختياري)</label>
-        <textarea class="input" name="image_b64" placeholder="رابط الصورة أو مسار Base64..."></textarea>
+        <label class="label">🖼️ صورة الصنف (اختياري)</label>
+        <input type="file" name="image_file" accept="image/*" class="input" style="padding:8px;">
+        <div style="font-size:11px;color:var(--text2);margin-top:4px;">أو أدخل رابط الصورة:</div>
+        <input class="input" name="image_b64" placeholder="رابط الصورة..." style="margin-top:4px;">
       </div>
       <button class="btn btn-primary" type="submit">+ إضافة</button>
     </form>
@@ -1691,10 +1729,16 @@ ADMIN_HTML = """
         <div>
           <div style="font-weight:700;">{{ item['name'] }}</div>
           <div style="font-size:13px;color:var(--accent2);">{{ "%.2f"|format(item['price']) }} د.أ</div>
+          <div style="font-size:11px;color:var(--text2);">{{ '✅ متاح' if item['available'] else '❌ غير متاح' }}</div>
         </div>
-        <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
-          <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
-        </form>
+        <div style="display:flex;gap:6px;">
+          <form method="POST" action="/admin/menu/toggle/{{ item['id'] }}" style="margin:0;">
+            <button class="btn btn-sm" type="submit" style="padding:4px 10px;min-height:30px;background:{% if item['available'] %}var(--green){% else %}var(--muted){% endif %};border:none;color:#fff;border-radius:8px;cursor:pointer;">{{ '⏸' if item['available'] else '▶' }}</button>
+          </form>
+          <form method="POST" action="/admin/menu/delete/{{ item['id'] }}" style="margin:0;">
+            <button class="btn btn-red btn-sm" type="submit" onclick="return confirm('حذف {{ item['name'] }}؟')">🗑️</button>
+          </form>
+        </div>
       </div>
       {% endfor %}
       {% endif %}
@@ -1784,6 +1828,10 @@ ADMIN_HTML = """
     <div class="stat"><div class="stat-val" style="color:#c39bd3;">{{ "%.2f"|format(total_draws) }}</div><div class="stat-label">السحوبات (د.أ)</div></div>
     <div class="stat"><div class="stat-val" style="color:{% if net >= 0 %}var(--green){% else %}var(--red){% endif %};">{{ "%.2f"|format(net) }}</div><div class="stat-label">صافي الربح (د.أ)</div></div>
   </div>
+  <div class="stat-row">
+    <div class="stat"><div class="stat-val" style="color:#2ecc71;">{{ "%.2f"|format(cash_sales) }}</div><div class="stat-label">💵 نقدي</div></div>
+    <div class="stat"><div class="stat-val" style="color:#3498db;">{{ "%.2f"|format(electronic_sales) }}</div><div class="stat-label">💳 إلكتروني</div></div>
+  </div>
   <div class="card">
     <div class="card-title">الطلبات المكتملة</div>
     {% for o in orders %}
@@ -1810,7 +1858,13 @@ ADMIN_HTML = """
     <div class="card-title">التقرير الشهري المفصل</div>
     {% for m in monthly_list %}
     <div class="list-item" style="flex-direction:column;align-items:flex-start;gap:6px;border-color:var(--border);background:var(--surface2);padding:12px;border-radius:10px;margin-bottom:10px;">
-      <div style="font-weight:900;font-size:16px;color:var(--text);margin-bottom:4px;border-bottom:1px solid var(--border);width:100%;padding-bottom:4px;">شهر: {{ m['month'] }}</div>
+      <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+        <div style="font-weight:900;font-size:16px;color:var(--text);">شهر: {{ m['month'] }}</div>
+        <form method="POST" action="/admin/month/delete/{{ m['month'] }}" style="margin:0;">
+          <button type="submit" class="btn btn-red btn-sm" style="padding:4px 10px;min-height:28px;"
+            onclick="return confirm('حذف جميع بيانات شهر {{ m['month'] }} نهائياً؟')">🗑️ حذف</button>
+        </form>
+      </div>
       <div style="display:flex;justify-content:space-between;width:100%;font-size:13px;">
         <span style="color:var(--text2);">المبيعات:</span>
         <span style="font-weight:700;color:var(--accent2);">{{ "%.2f"|format(m['sales']) }} د.أ</span>
@@ -1830,6 +1884,94 @@ ADMIN_HTML = """
     </div>
     {% endfor %}
     {% if not monthly_list %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد بيانات</div>{% endif %}
+  </div>
+</div>
+
+<!-- ANALYTICS TAB -->
+<div id="atab-analytics" class="page" style="display:none;">
+  <div class="card">
+    <div class="card-title">📈 تحليلات المبيعات</div>
+    {% if analytics %}
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--border);">
+            <th style="padding:10px 8px;text-align:right;color:var(--text2);">الصنف</th>
+            <th style="padding:10px 8px;text-align:center;color:var(--text2);">الكمية</th>
+            <th style="padding:10px 8px;text-align:left;color:var(--text2);">الإيرادات</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in analytics %}
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;font-weight:700;">{{ a['item_name'] }}</td>
+            <td style="padding:8px;text-align:center;color:var(--accent2);font-weight:700;">{{ a['total_qty'] }}</td>
+            <td style="padding:8px;text-align:left;color:var(--green);font-weight:700;">{{ "%.2f"|format(a['total_revenue']) }} د.أ</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div style="text-align:center;color:var(--muted);padding:16px;">لا توجد بيانات</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- DEBTS TAB -->
+<div id="atab-debts" class="page" style="display:none;">
+  <div class="card">
+    <div class="card-title">➕ تسجيل دين جديد</div>
+    <form method="POST" action="/admin/debts/add">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="label">اسم الزبون</label>
+          <input class="input" name="customer_name" placeholder="اسم الزبون" required>
+        </div>
+        <div class="form-group">
+          <label class="label">المبلغ (د.أ)</label>
+          <input class="input" name="amount" type="number" step="0.01" min="0" placeholder="0.00" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="label">ملاحظة (اختياري)</label>
+        <input class="input" name="note" placeholder="تفاصيل الدين...">
+      </div>
+      <button class="btn btn-primary" type="submit">+ تسجيل</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📒 الديون المعلقة ({{ pending_debts|length }})</div>
+    {% for debt in pending_debts %}
+    <div class="list-item">
+      <div>
+        <div style="font-weight:700;">{{ debt['customer_name'] }}</div>
+        <div style="font-size:11px;color:var(--text2);">{{ debt['note'] or '—' }} · {{ debt['employee'] }} · {{ debt['created_at'][:10] }}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="color:var(--red);font-weight:700;">{{ "%.2f"|format(debt['amount']) }} د.أ</div>
+        <form method="POST" action="/admin/debts/paid/{{ debt['id'] }}" style="margin:0;">
+          <button type="submit" class="btn btn-green btn-sm" style="padding:4px 10px;min-height:28px;" onclick="return confirm('تأكيد الدفع؟')">✅ تم الدفع</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+    {% if not pending_debts %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد ديون معلقة</div>{% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-title">✅ الديون المسددة ({{ paid_debts|length }})</div>
+    {% for debt in paid_debts %}
+    <div class="list-item" style="opacity:0.6;">
+      <div>
+        <div style="font-weight:700;">{{ debt['customer_name'] }}</div>
+        <div style="font-size:11px;color:var(--text2);">{{ debt['note'] or '—' }} · {{ debt['created_at'][:10] }}</div>
+      </div>
+      <div style="color:var(--green);font-weight:700;">{{ "%.2f"|format(debt['amount']) }} د.أ</div>
+    </div>
+    {% endfor %}
+    {% if not paid_debts %}<div style="text-align:center;color:var(--muted);padding:16px;">لا توجد</div>{% endif %}
   </div>
 </div>
 
@@ -1867,6 +2009,10 @@ def admin():
         draws = [dict(d) for d in qry(conn, "SELECT * FROM draws WHERE day_id=%s ORDER BY id DESC", (day["id"],)).fetchall()]
         total_draws = sum(d["amount"] for d in draws)
 
+    # Cash vs Electronic split
+    cash_sales = sum(o["total"] for o in orders if o.get("payment") == "نقدي")
+    electronic_sales = total_sales - cash_sales
+
     prev_raw = qry(conn, """
         SELECT d.id, d.started_at, SUM(o.total) AS sales
         FROM days d LEFT JOIN orders o ON o.day_id=d.id
@@ -1899,6 +2045,21 @@ def admin():
     
     monthly_list = sorted([{"month": k, **v} for k,v in monthly_stats.items()], key=lambda x: x["month"], reverse=True)
 
+    # Analytics: product sales
+    analytics = qry(conn, """
+        SELECT oi.item_name, SUM(oi.qty) AS total_qty, SUM(oi.price * oi.qty) AS total_revenue
+        FROM order_items oi JOIN orders o ON oi.order_id = o.id
+        GROUP BY oi.item_name ORDER BY total_qty DESC
+    """).fetchall()
+
+    # Debts
+    pending_debts = [dict(d) for d in qry(conn, "SELECT * FROM debts WHERE status='pending' ORDER BY id DESC").fetchall()]
+    paid_debts = [dict(d) for d in qry(conn, "SELECT * FROM debts WHERE status='paid' ORDER BY id DESC LIMIT 20").fetchall()]
+
+    # Settings
+    phone_row = qry(conn, "SELECT value FROM settings WHERE key='phone'").fetchone()
+    phone = phone_row["value"] if phone_row else "0790000000"
+
     conn.close()
 
     host         = request.host_url.rstrip("/")
@@ -1908,8 +2069,11 @@ def admin():
         day=day, items=items, orders=orders, expenses=expenses, draws=draws,
         total_sales=total_sales, total_expenses=total_expenses,
         total_draws=total_draws,
+        cash_sales=cash_sales, electronic_sales=electronic_sales,
         net=total_sales - total_expenses - total_draws,
         prev_days=prev_days, monthly_list=monthly_list, customer_url=customer_url,
+        analytics=analytics, pending_debts=pending_debts, paid_debts=paid_debts,
+        phone=phone,
         user_name=session["user_name"], msg=msg)
 
 @app.route("/admin/orders/delete/<int:oid>", methods=["POST"])
@@ -1945,6 +2109,23 @@ def day_close():
         conn.close()
     return redirect("/admin")
 
+@app.route("/admin/day/delete/<int:day_id>", methods=["POST"])
+@login_required
+@admin_required
+def day_delete(day_id):
+    conn = get_db()
+    # Delete order_items for all orders in this day
+    order_rows = qry(conn, "SELECT id FROM orders WHERE day_id=%s", (day_id,)).fetchall()
+    for o in order_rows:
+        exe(conn, "DELETE FROM order_items WHERE order_id=%s", (o["id"],))
+    exe(conn, "DELETE FROM orders WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM expenses WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM draws WHERE day_id=%s", (day_id,))
+    exe(conn, "DELETE FROM days WHERE id=%s", (day_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم حذف اليوم بنجاح")
+
 @app.route("/admin/menu/add", methods=["POST"])
 @login_required
 @admin_required
@@ -1954,6 +2135,13 @@ def menu_add():
     category    = request.form.get("category", "hot_coffee")
     description = request.form.get("description", "").strip()
     image_b64   = request.form.get("image_b64", "").strip()
+    # Handle file upload
+    image_file  = request.files.get("image_file")
+    if image_file and image_file.filename:
+        img_data = image_file.read()
+        img_b64  = base64.b64encode(img_data).decode("utf-8")
+        mime     = image_file.content_type or "image/jpeg"
+        image_b64 = f"data:{mime};base64,{img_b64}"
     if name and price > 0:
         conn = get_db()
         exe(conn, "INSERT INTO menu_items (name, price, category, description, image_b64) VALUES (%s,%s,%s,%s,%s)", (name, price, category, description, image_b64))
@@ -2001,6 +2189,77 @@ def qr_image():
     resp = make_response(buf.read())
     resp.headers["Content-Type"] = "image/png"
     return resp
+
+@app.route("/admin/menu/toggle/<int:item_id>", methods=["POST"])
+@login_required
+@admin_required
+def menu_toggle(item_id):
+    conn = get_db()
+    item = qry(conn, "SELECT available FROM menu_items WHERE id=%s", (item_id,)).fetchone()
+    if item:
+        new_val = 0 if item["available"] else 1
+        exe(conn, "UPDATE menu_items SET available=%s WHERE id=%s", (new_val, item_id))
+        conn.commit()
+    conn.close()
+    return redirect("/admin#atab-menu")
+
+@app.route("/admin/month/delete/<month>", methods=["POST"])
+@login_required
+@admin_required
+def month_delete(month):
+    conn = get_db()
+    # Find all days in this month
+    days_in_month = qry(conn, "SELECT id FROM days WHERE started_at LIKE %s", (month + "%",)).fetchall()
+    for d in days_in_month:
+        order_rows = qry(conn, "SELECT id FROM orders WHERE day_id=%s", (d["id"],)).fetchall()
+        for o in order_rows:
+            exe(conn, "DELETE FROM order_items WHERE order_id=%s", (o["id"],))
+        exe(conn, "DELETE FROM orders WHERE day_id=%s", (d["id"],))
+        exe(conn, "DELETE FROM expenses WHERE day_id=%s", (d["id"],))
+        exe(conn, "DELETE FROM draws WHERE day_id=%s", (d["id"],))
+    exe(conn, "DELETE FROM days WHERE started_at LIKE %s", (month + "%",))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم حذف شهر " + month + "#atab-monthly")
+
+@app.route("/admin/debts/add", methods=["POST"])
+@login_required
+@admin_required
+def debt_add():
+    customer_name = request.form.get("customer_name", "").strip()
+    amount = float(request.form.get("amount", 0))
+    note = request.form.get("note", "").strip()
+    if customer_name and amount > 0:
+        conn = get_db()
+        exe(conn,
+            "INSERT INTO debts (customer_name, amount, note, status, employee, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (customer_name, amount, note, "pending", session["user_name"], now_str()))
+        conn.commit()
+        conn.close()
+    return redirect("/admin?msg=تم تسجيل الدين#atab-debts")
+
+@app.route("/admin/debts/paid/<int:debt_id>", methods=["POST"])
+@login_required
+@admin_required
+def debt_paid(debt_id):
+    conn = get_db()
+    exe(conn, "UPDATE debts SET status='paid' WHERE id=%s", (debt_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/admin?msg=تم تسديد الدين#atab-debts")
+
+@app.route("/admin/settings/phone", methods=["POST"])
+@login_required
+@admin_required
+def settings_phone():
+    phone = request.form.get("phone", "").strip()
+    if phone:
+        conn = get_db()
+        exe(conn, "DELETE FROM settings WHERE key='phone'")
+        exe(conn, "INSERT INTO settings (key, value) VALUES ('phone', %s)", (phone,))
+        conn.commit()
+        conn.close()
+    return redirect("/admin?msg=تم تحديث رقم الهاتف#atab-qr")
 
 # ─── INIT ON STARTUP (gunicorn + python both) ────────────────────
 try:
