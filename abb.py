@@ -2260,7 +2260,37 @@ def settings_phone():
         conn.commit()
         conn.close()
     return redirect("/admin?msg=تم تحديث رقم الهاتف#atab-qr")
+# صفحة تسجيل الدخول
+@app.route('/admin_login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        pin = request.form.get('pin')
+        # التحقق من كلمة السر '8888' لاسم المستخدم 'نشمي'
+        if pin == "8888":
+            session['user_role'] = 'admin'
+            session['user_name'] = 'نشمي'
+            return redirect(url_for('admin_panel'))
+        else:
+            return "كلمة السر خاطئة يا نشمي، حاول مرة ثانية!"
+            
+    return '''
+        <div style="text-align:center; direction:rtl; margin-top:50px;">
+            <h2>دخول الإدارة - نشمي كافيه</h2>
+            <form method="post">
+                <input type="password" name="pin" placeholder="أدخل كلمة السر" required>
+                <button type="submit">دخول</button>
+            </form>
+        </div>
+    '''
 
+# صفحة لوحة الإدارة
+@app.route('/admin_panel')
+def admin_panel():
+    # التأكد أن المستخدم مسجل دخول كأدمن
+    if session.get('user_role') != 'admin':
+        return redirect(url_for('admin_login'))
+        
+    return "أهلاً بك في لوحة تحكم نشمي كافيه! (هنا تضع محتويات الإدارة)"
 # ─── INIT ON STARTUP (gunicorn + python both) ────────────────────
 try:
     init_db()
